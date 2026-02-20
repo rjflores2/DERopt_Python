@@ -5,9 +5,11 @@ from importlib import import_module
 
 MODULES = [
     "config",
+    "config.case_config",
     "data_loading",
     "data_loading.schemas",
     "data_loading.loaders",
+    "data_loading.loaders.energy_load",
     "model",
     "model.core",
     "utilities",
