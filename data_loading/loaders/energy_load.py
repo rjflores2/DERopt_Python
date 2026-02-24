@@ -305,7 +305,7 @@ def load_energy_demand(cfg: EnergyLoadFileConfig) -> DataContainer:
             else:
                 try:
                     serial = float(dt_raw) # If the datetime column is a float, parse it as a serial number
-                    effective_datetime_format = ( # Determine the effective datetime format based on the serial number  (matlab_serial if greater than the typical matlab serial number, otherwise excel_serial)
+                    effective_datetime_format = ( # Determine the effective datetime format based on the serial number  (matlab_serial if greater than the typical matlab serial number, otherwise excel_serial)        
                         "matlab_serial"
                         if serial >= _SERIAL_MATLAB_MIN # If the serial number is greater than the typical matlab serial number, set the effective datetime format to matlab_serial
                         else "excel_serial" # Otherwise, set the effective datetime format to excel_serial
@@ -318,64 +318,64 @@ def load_energy_demand(cfg: EnergyLoadFileConfig) -> DataContainer:
         parsed_row_values: dict[str, float] = {} # Initialize the parsed row values
         any_value_present = False # Initialize the any value present flag
         for col in load_columns: # Iterate over the load columns
-            load_val = row.get(col)
-            if load_val is None or (isinstance(load_val, float) and pd.isna(load_val)):
+            load_val = row.get(col) # Get the load value from the row
+            if load_val is None or (isinstance(load_val, float) and pd.isna(load_val)): # If the load value is not found or is NaN, continue
                 continue
-            if isinstance(load_val, str) and not load_val.strip():
+            if isinstance(load_val, str) and not load_val.strip(): # If the load value is an empty string, continue
                 continue
-            any_value_present = True
+            any_value_present = True # Set the any value present flag to True
             try:
-                parsed_row_values[col] = float(load_val)
+                parsed_row_values[col] = float(load_val) # Parse the load value as a float
             except (ValueError, TypeError) as exc:
-                raise ValueError(
+                raise ValueError( # If the load value is not a float, raise an error
                     f"Row {row_idx}: failed float parse for column '{col}' value '{load_val!r}'"
                 ) from exc
 
-        if not any_value_present:
+        if not any_value_present: # If no value is present, continue
             continue
 
-        fill_missing = math.nan if cfg.target_interval_minutes is not None else 0.0
-        datetimes.append(dt)
+        fill_missing = math.nan if cfg.target_interval_minutes is not None else 0.0 # Determine the fill missing value based on the configuration
+        datetimes.append(dt) # Add the datetime to the datetimes list
         for col in load_columns:
-            series_values[col].append(parsed_row_values.get(col, fill_missing))
+            series_values[col].append(parsed_row_values.get(col, fill_missing)) # Add the load value to the series values
 
-    if not datetimes:
-        raise ValueError(f"No load rows were parsed from {file_path}")
+    if not datetimes: # If no datetimes are present, raise an error
+        raise ValueError(f"No load rows were parsed from {file_path}") # If no datetimes are present, raise an error    
 
     # Ensure chronological order if source rows are not sorted.
-    series_matrix = [series_values[col] for col in load_columns]
-    paired_rows = list(zip(datetimes, *series_matrix))
-    paired_rows.sort(key=lambda x: x[0])
-    datetimes = [row[0] for row in paired_rows]
-    sorted_series = {
-        col: [row[idx + 1] for row in paired_rows]
-        for idx, col in enumerate(load_columns)
+    series_matrix = [series_values[col] for col in load_columns] # Create a matrix of the series values
+    paired_rows = list(zip(datetimes, *series_matrix)) # Pair the datetimes with the series values
+    paired_rows.sort(key=lambda x: x[0]) # Sort the paired rows by the datetime
+    datetimes = [row[0] for row in paired_rows] # Get the datetimes from the paired rows
+    sorted_series = { # Create a dictionary of the sorted series
+        col: [row[idx + 1] for row in paired_rows] # Get the series values from the paired rows
+        for idx, col in enumerate(load_columns) # Iterate over the load columns
     }
 
     # Time conditioning: regularize timestamps, fill NaN/negative via interpolation.
-    datetimes, sorted_series = _condition_time_series(datetimes, sorted_series, cfg)
+    datetimes, sorted_series = _condition_time_series(datetimes, sorted_series, cfg) # Condition the time series
 
     # Basic regular-step check (used by downstream resampling/alignment slices).
-    dt_hours = None
-    if len(datetimes) >= 2:
-        dt_seconds = (datetimes[1] - datetimes[0]).total_seconds()
-        dt_hours = dt_seconds / 3600.0
+    dt_hours = None # Initialize the time step hours
+    if len(datetimes) >= 2: # If there are at least two datetimes, calculate the time step hours    
+        dt_seconds = (datetimes[1] - datetimes[0]).total_seconds() # Calculate the time step seconds        
+        dt_hours = dt_seconds / 3600.0 # Convert the time step seconds to hours
 
-    primary_column = load_columns[0]
-    timeseries = {
+    primary_column = load_columns[0] # Get the primary load column  
+    timeseries = { # Create a dictionary of the timeseries  
         "datetime": datetimes,
         "time_serial": [_datetime_to_matlab_serial(dt) for dt in datetimes],
         # Backwards-compatible alias expected by existing validation.
         "electricity_demand": sorted_series[primary_column],
     }
-    for col in load_columns:
-        suffix = _normalize_series_key(col)
+    for col in load_columns: # Iterate over the load columns
+        suffix = _normalize_series_key(col) # Normalize the series key
         timeseries[f"electricity_demand__{suffix}"] = sorted_series[col]
 
-    unique_units = sorted(set(series_units.values()))
+    unique_units = sorted(set(series_units.values())) # Get the unique units
     load_units = unique_units[0] if len(unique_units) == 1 else "mixed"
 
-    container = DataContainer(
+    container = DataContainer( # Create a data container that is shared with the rest of the model 
         indices={"time": list(range(len(datetimes)))},
         timeseries=timeseries,
         static={
