@@ -130,6 +130,10 @@ flowchart LR
 Loading and alignment of energy data are critical. The **time vector** is the master index: all load, resource (e.g., solar and wind), and rate series in the data container must be defined on the same regular time grid so the model's set `T` has a single, consistent index.
 
 - **Resampling irregular time**: Raw data may have irregular or sporadic timestamps (e.g. readings at varying minutes within the hour). Loaders must support **resampling/aggregation** to a regular time step (e.g. hourly or 15-minute). Options: (1) bin raw points into intervals and aggregate (sum for energy, mean for rates/capacity factors), or (2) interpolate to a regular datetime index. The output is a regular `time` array (length T) and all series have length T.
+- **Time conditioning and gap-filling (energy load)**: The load loader applies the following pipeline after raw parse:
+  1. **Fill data**: Replace negative with NaN if configured; interpolate to fill NaN and invalid values (even when the time grid is not changed).
+  2. **Optional resample**: Only when `target_interval_minutes` is set, resample to that target interval (e.g. 60 or 15 minutes). With `resample_only_if_irregular=True`, resampling happens only if timestamps differ significantly from the target grid (beyond `resample_tolerance_seconds`). If timestamps are already regular within tolerance, skip resampling and only fill NaN/negative.
+  3. **Config options**: `target_interval_minutes` (None by default = keep native grid), `interpolation_method`, `treat_negative_as_missing`, `resample_only_if_irregular` (default True), `resample_tolerance_seconds` (default 60).
 - **Filtering/smoothing of building load**: Raw building load data may contain **signal noise**. Support optional **filtering** when loading (e.g. moving average over a configurable window, or minimum-threshold to drop spurious zeros). Config should allow enabling/disabling and tuning (window size, min fraction of mean). Filtering is applied after resampling so the load series remains aligned to the master time vector.
 - **Alignment of other inputs to the time vector**: Once the master time vector is fixed (from load data after resampling and optional filtering, or from an explicit requested range/interval):
   - **Solar, wind, hydro**: Resource profile data (often from separate files or longer series) must be **selected or interpolated** to match the time vector (same datetimes or same index range). E.g. interpolate solar irradiance to `time` if the solar file has different timestamps.
@@ -138,6 +142,50 @@ Loading and alignment of energy data are critical. The **time vector** is the ma
 Implement this in `data_loading/`: a **time** utility or first step that (1) builds the regular time vector from load data (with resampling and optional smoothing), then (2) all other loaders (resources, rates) take that time vector and return series of length T.
 
 **3.1 Load profiles**
+
+**Data flow within `data_loading/loaders/energy_load.py`:**
+
+```mermaid
+flowchart TB
+  Main[load_energy_demand]
+  Branch{suffix}
+  LoadExcel[_load_rows_from_excel]
+  LoadCSV[_load_rows_from_csv]
+  Dedup[_deduplicate_headers]
+  Resolve[_resolve_load_columns]
+  InferUnits[_infer_units_from_header]
+  Loop[Loop over rows]
+  ParseDT[_parse_datetime_cell]
+  Sort[Sort by datetime]
+  Condition[_condition_time_series]
+  BuildTimeseries[Build timeseries dict]
+  Container[DataContainer]
+
+  Main --> Branch
+  Branch -->|".xlsx or .xls"| LoadExcel
+  Branch -->|".csv"| LoadCSV
+  LoadExcel --> Dedup
+  LoadCSV --> Dedup
+  Dedup --> Resolve
+  Resolve --> InferUnits
+  InferUnits --> Loop
+  Loop --> ParseDT
+  ParseDT --> Sort
+  Sort --> Condition
+  Condition --> BuildTimeseries
+  BuildTimeseries --> Container
+```
+
+*Helpers used internally:* `_parse_datetime_cell` calls `_matlab_serial_to_datetime` or `_excel_serial_to_datetime`; `Build timeseries` uses `_datetime_to_matlab_serial` and `_normalize_series_key`.
+
+| Step | Function | Purpose |
+|------|----------|---------|
+| Load | `_load_rows_from_excel` / `_load_rows_from_csv` | Read file; `_deduplicate_headers` makes column names unique |
+| Resolve | `_resolve_load_columns` | Select load columns (configured or fallback to `(kW)`/`(kWh)`) |
+| Units | `_infer_units_from_header` | Infer kW vs kWh from header text |
+| Parse | `_parse_datetime_cell` | Convert datetime; uses `_matlab_serial_to_datetime` / `_excel_serial_to_datetime` |
+| Condition | `_condition_time_series` | Resample to regular interval; interpolate NaN/negative |
+| Build | `_datetime_to_matlab_serial`, `_normalize_series_key` | Build timeseries dict and `DataContainer` |
 
 - Support at least **electrical**, **thermal** (heating, cooling), and **chemical** (e.g. H2 demand) time series. Allow for future inclusion of **domestic_hot_water** and **industrial_heat** as separate load types if needed (may not be implemented initially).
 - One or more "buildings" or "load buses" with a shared time index; **T_map** is the **transformer map**: it maps each building/load bus to a transformer (node). Multiple buildings or loads can be connected to the same transformer and can have **different behavior** (e.g. different load profiles, tariff classes, or DER); the model aggregates or disaggregates as needed for network constraints.

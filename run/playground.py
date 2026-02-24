@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from config import get_case_config
-from data_loading.loaders import load_energy_demand_csv
+from data_loading.loaders import load_energy_demand
 from model.core import build_model
 
 
@@ -14,7 +14,7 @@ def main() -> int:
     case_name = os.getenv("DEROPT_CASE", "igiugig")
     case_cfg = get_case_config(project_root, case_name)
 
-    data = load_energy_demand_csv(case_cfg.energy_load)
+    data = load_energy_demand(case_cfg.energy_load)
     model = build_model()
 
     # Slice 2/3 loader smoke output for quick local verification.
