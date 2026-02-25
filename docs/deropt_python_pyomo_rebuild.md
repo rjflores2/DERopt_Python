@@ -114,7 +114,7 @@ flowchart LR
 1. **Load config** - paths to `data/`, which utilities and technologies are enabled, single vs multi-node, etc.
 2. **Build data** - `data_loading/`: establish master time vector (resampling, optional load smoothing), then load profiles, resource profiles, and rates aligned to that time vector; output `DataContainer`.
 3. **Build model** - Create Pyomo `ConcreteModel`.
-  - **model/core.py**: Define Sets (`T`, `K`, ...), Params from `DataContainer` (e.g. `electricity_demand`). Do not yet add balance constraints or full objective.
+  - **model/core.py**: Define Sets (`T`, `K`, ...), Params from `DataContainer` (e.g. electricity load series from `electricity_load_keys` and `timeseries`). Do not yet add balance constraints or full objective.
   - **utilities/**: Add electricity_import_export block (and optionally network block if multi-node). Each block adds its vars/constraints and registers its **electricity_supply_term**, **electricity_load_term**, and **objective contribution** with core.
   - **technologies/**: For each enabled technology (from config), add its block. Each registers supply/load terms for electrical (and optionally thermal, H2) and its objective contribution.
   - **model/core.py**: Add electrical (and thermal, H2) balance constraints by summing the registered supply and load terms. Form the single objective by summing the registered cost contributions (core does not define what each contribution is-only the sum).
@@ -147,7 +147,7 @@ Implement this in `data_loading/`: a **time** utility or first step that (1) bui
 
 ```mermaid
 flowchart TB
-  Main[load_energy_demand]
+  Main[load_energy_load]
   Branch{suffix}
   LoadExcel[_load_rows_from_excel]
   LoadCSV[_load_rows_from_csv]
@@ -189,23 +189,23 @@ flowchart TB
 
 - Support at least **electrical**, **thermal** (heating, cooling), and **chemical** (e.g. H2 demand) time series. Allow for future inclusion of **domestic_hot_water** and **industrial_heat** as separate load types if needed (may not be implemented initially).
 - One or more "buildings" or "load buses" with a shared time index; **T_map** is the **transformer map**: it maps each building/load bus to a transformer (node). Multiple buildings or loads can be connected to the same transformer and can have **different behavior** (e.g. different load profiles, tariff classes, or DER); the model aggregates or disaggregates as needed for network constraints.
-- **Loaders**: Read from CSV or Excel (and optionally `.mat` via `scipy.io` for parity with existing data). Apply **resampling** to regular steps (hourly or 15-min) and **optional smoothing** (see 3.0). Output a unified structure, e.g.:
-  - `time` (regular index or datetime, length T),
-  - `electricity`, `thermal_heating`, `thermal_cooling`, `hydrogen_demand` (descriptive names) as 1D or 2D arrays (T) or (T, K); optionally `domestic_hot_water`, `industrial_heat` for future use,
+- **Loaders**: Read from CSV or Excel (and optionally `.mat` via `scipy.io` for parity with existing data). Apply **resampling** to regular steps when configured and **optional smoothing** (see 3.0). Output a unified structure, e.g.:
+  - `indices["time"]` (length T), `timeseries["datetime"]`, `timeseries["time_serial"]`,
+  - `static["electricity_load_keys"]` (list) and `timeseries["electricity_load__{suffix}"]` per load column (units kWh); optionally `thermal_heating`, `thermal_cooling`, `hydrogen_demand`; optionally `domestic_hot_water`, `industrial_heat` for future use,
   - `month_endpoints` / `month_startpoints` for monthly boundaries if demand charges are used,
   - `day_weight`: when the optimization uses fewer than 365 days (e.g. representative days), this weighting factor scales costs from those days up to a full year so that energy costs are annualized correctly.
 - **Filtering**: Support year/month selection and time-step conversion (e.g. 15 min vs hourly) as in the MATLAB `bldg_loader_UCI.m` pattern.
 
 **3.2 Renewable resource profiles**
 
-- **Solar**: Normalized or absolute (e.g. kW/m^2 or capacity factor) per time step - used like `solar` in the MATLAB `opt_pv.m` formulation.
+- **Solar**: Loader reads capacity factor (0–1) from file, aligns to load time vector by time-of-year, and converts to **kWh per kW capacity** (CF × dt_hours). Stored as `solar_production__{suffix}`; list in `static["solar_production_keys"]`; units `"kWh/kW"`. Used in PV block as production potential per kW.
 - **Wind**: Same idea (capacity factor or power curve input).
 - **Hydro family (stand-alone)**:
   - **Hydrokinetic**: resource signal from flow velocity/current profile (or precomputed available power).
   - **Run-of-river**: available flow/head or precomputed available power profile (e.g. `opt_run_of_river.m` parity path).
   - **Dam hydro**: inflow profile + storage/reservoir state data and operating limits.
   - **Pumped hydro**: two-mode data (pumping/generation), storage volume limits, and round-trip efficiency inputs.
-- Load from CSV/Excel (and optionally `.mat`). **Align to the master time vector**: select or interpolate so `solar_capacity_factor`, wind, and hydro-family series have length T and correspond to `time` (see 3.0). Allow different profiles per node or per technology if needed.
+- Load from CSV/Excel (and optionally `.mat`). **Align to the master time vector**: select or interpolate so `solar_production` (kWh/kW), wind, and hydro-family series have length T and correspond to `time` (see 3.0). Allow different profiles per node or per technology if needed.
 
 **3.3 Import/export rates (retail)**
 
@@ -230,10 +230,10 @@ flowchart TB
 | Category              | Item                                                                                                                | Description                                                                           |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **Time**              | `time`                                                                                                              | Master time index (length T); regular grid after resampling.                          |
-| **Loads**             | `electricity_demand`, `thermal_heating`, `thermal_cooling`, `hydrogen_demand`                                       | 1D or 2D (T) or (T,K); optional `domestic_hot_water`, `industrial_heat`.              |
+| **Loads**             | `electricity_load_keys` (list), `timeseries["electricity_load__{suffix}"]` per load column; `thermal_heating`, `thermal_cooling`, `hydrogen_demand` | 1D or 2D (T) or (T,K); units kWh; optional `domestic_hot_water`, `industrial_heat`.   |
 |                       | `month_endpoints`, `month_startpoints`                                                                              | Monthly boundaries for demand charges.                                                |
 |                       | `day_weight`                                                                                                        | Weight to annualize costs when using fewer than 365 days.                             |
-| **Resources**         | `solar_capacity_factor`, `wind_capacity_factor`                                                                     | Length T; aligned to `time`. Optional hydro profile.                                  |
+| **Resources**         | `solar_production_keys` (list), `timeseries["solar_production__{suffix}"]` (kWh/kW); wind analogous                  | Length T; aligned to `time`. Optional hydro profile.                                  |
 | **Rates**             | `electricity_import_price`, `electricity_export_price`                                                              | Length T; from fixed params or OpenEI-style/utility table.                            |
 |                       | Demand charge params                                                                                                | Non-TOU, on-peak, mid-peak rates and windows.                                         |
 | **Network**           | `load_bus_to_node_map` (T_map), branch/node params                                                                  | Multi-node only.                                                                      |
@@ -258,7 +258,7 @@ flowchart TB
 
 | Category             | Parameters                                                                                    | Description                                                    |
 | -------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| **Loads**            | `electricity_demand[t]` (or per-bus), `thermal_heating`, `thermal_cooling`, `hydrogen_demand` | From DataContainer; used in balance constraints.               |
+| **Loads**            | Electricity load from `electricity_load_keys` and timeseries (per-bus if multi-node); `thermal_heating`, `thermal_cooling`, `hydrogen_demand` | From DataContainer; used in balance constraints.               |
 | **Resources / tech** | Per-technology params                                                                         | Consumed by respective technology blocks (not stored in core). |
 
 **4.3 Variables**
@@ -272,7 +272,8 @@ flowchart TB
 **4.5 Core constraints (balance assembly only)**
 
 - **Electrical balance**:
-`sum(electricity_supply_terms) == electricity_demand + sum(electricity_load_terms)`
+`sum(electricity_supply_terms) == electricity_load + sum(electricity_load_terms)`
+where `electricity_load` is the (sum of) building load series from `electricity_load_keys`; load_terms are e.g. battery charge, export.
 where terms are provided by enabled **utilities** modules (e.g., electricity_import_export when active) and by **technology** blocks. Core iterates over collected terms; no hard-coded tech or utility names.
 - **Thermal balance**: same pattern - sum of thermal supply terms == thermal demand + sum of thermal load terms (if any).
 - **Hydrogen balance**: sum of H2 supply terms == sum of H2 load terms (+ external demand).
@@ -333,7 +334,7 @@ Each technology is a **module** that:
 
 **Grid import/export** and all utility rules (demand charges, NEM, import limits, etc.) live under **utilities/** (e.g. `utilities/electricity_import_export.py`), not in core or under technologies.
 
-**Existing (legacy) generation**: A location may have **existing** assets - e.g. existing solar PV, existing diesel generators - and the optimization can decide whether to **keep** what is there and/or **expand**. Model this **within each technology component**: each technology block accepts an optional **existing capacity** parameter (and optionally existing O&M or cost terms) from **tech_params** (or config). In each module, **total available capacity** = existing capacity + capacity adopted (e.g. `solar_generation[t] <= solar_capacity_factor[t] * (existing_solar_capacity + photovoltaic_capacity_adopted)`). The objective can treat existing as sunk (no new capital) and charge only O&M, while new capacity adds capital annuity + O&M. Optionally, a **keep/retire** decision for existing assets can be modeled (e.g. binary or fixed to "keep" in a first version). Config or tech_params supply existing capacity per technology so "greenfield" vs "existing + expand" runs are both supported.
+**Existing (legacy) generation**: A location may have **existing** assets - e.g. existing solar PV, existing diesel generators - and the optimization can decide whether to **keep** what is there and/or **expand**. Model this **within each technology component**: each technology block accepts an optional **existing capacity** parameter (and optionally existing O&M or cost terms) from **tech_params** (or config). In each module, **total available capacity** = existing capacity + capacity adopted (e.g. `solar_generation[t] <= (existing_solar_capacity + photovoltaic_capacity_adopted) * solar_production[t]` where `solar_production` is in kWh/kW). The objective can treat existing as sunk (no new capital) and charge only O&M, while new capacity adds capital annuity + O&M. Optionally, a **keep/retire** decision for existing assets can be modeled (e.g. binary or fixed to "keep" in a first version). Config or tech_params supply existing capacity per technology so "greenfield" vs "existing + expand" runs are both supported.
 
 **Explicit technology set** (inclusion per run is config-driven; each can be enabled/disabled or gated on resource availability):
 
@@ -341,7 +342,7 @@ Each technology is a **module** that:
 
 | Technology                            | Key variables (descriptive)                                                         | Key constraints / notes                                                                                                                                          |
 | ------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **solar_pv**                          | `solar_generation[t]`, `solar_capacity_adopted`                                     | `solar_generation <= solar_capacity_factor * photovoltaic_capacity_adopted`; maximum_solar_capacity                                                              |
+| **solar_pv**                          | `solar_generation[t]`, `solar_capacity_adopted`                                     | `solar_generation <= (existing + adopted) * solar_production[t]` (solar_production in kWh/kW); maximum_solar_capacity                                                              |
 | **wind**                              | `wind_generation[t]`, `wind_capacity_adopted`                                       | `wind_generation <= wind_capacity_factor * wind_capacity_adopted`                                                                                                |
 | **diesel_generation**                 | `diesel_generation[t]`, `diesel_fuel[t]`, `diesel_capacity_adopted`                 | Efficiency/fuel consumption, capacity; optional MILP: operational state (on/off), min/max load. Optional detail: part-load efficiency via heat rate (see below). |
 | **gas_turbine**                       | `gas_turbine_electricity[t]`, `gas_turbine_fuel[t]`, `gas_turbine_capacity_adopted` | MILP: **operational state** (on/off), **minimum/maximum load**; efficiency or heat rate. Optional detail: part-load efficiency via heat rate (see below).        |
@@ -450,13 +451,13 @@ Use **descriptive names** throughout the model and data layer instead of MATLAB-
 | `import` / `export`      | `electricity_import` / `electricity_export`           |
 | `heat` / `cool`          | `thermal_heating` / `thermal_cooling`                 |
 | `h2_demand`              | `hydrogen_demand`                                     |
-| `solar`                  | `solar_capacity_factor` or `solar_irradiance` (param) |
+| `solar`                  | `solar_production` (param, kWh/kW) or `solar_production__{suffix}` |
 | `import_price`           | `electricity_import_price`                            |
 | `export_price`           | `electricity_export_price`                            |
 | `nontou_dc`, `onpeak_dc` | `demand_charge_nontou`, `demand_charge_on_peak`       |
 | `pv_adopt`               | `photovoltaic_capacity_adopted`                       |
 
-- **Data container / loaders**: use the same descriptive keys (e.g. `electricity`, `thermal_heating`, `solar_capacity_factor`, `electricity_import_price`).
+- **Data container / loaders**: use the same descriptive keys (e.g. `electricity_load__{suffix}`, `electricity_load_keys`, `solar_production__{suffix}`, `solar_production_keys`, `thermal_heating`, `electricity_import_price`).
 - **Pyomo Sets**: can stay short where conventional (e.g. `T` for time, `K` for load buses, `N` for nodes) or use `time_steps`, `load_buses`, `nodes` if preferred.
 - **Pyomo Params/Vars**: use the descriptive names above so model components are self-explanatory.
 

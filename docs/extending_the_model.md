@@ -34,14 +34,14 @@ Technologies should be turned on/off by case config, not by branching model code
 
 ## Data Contract Expectations
 
-Loaders should build one validated data container:
+Loaders build one validated data container:
 
-- `indices`
-- `timeseries` (including canonical `time_serial[t]`)
-- `static`
-- `tech_params`
+- **indices**: e.g. `time` (required)
+- **timeseries**: `datetime`, `time_serial`; electricity load series keyed by `electricity_load__{suffix}` (one per load column); optional `solar_production__{suffix}` (kWh/kW) when solar is loaded
+- **static**: `time_step_hours`, `load_units` (always `"kWh"`), `electricity_load_keys` (list of load series keys, required); optional `solar_production_keys`, `solar_production_units` (`"kWh/kW"`), `solar_production_columns`
+- **tech_params**: per-technology parameter groups
 
-Technology modules read from `tech_params` and relevant shared series, but do not parse raw files directly.
+Validation (e.g. `validate_minimum_fields()`) requires `indices["time"]`, `timeseries["time_serial"]`, and a non-empty `static["electricity_load_keys"]` with each key present in `timeseries`. Technology modules read from `tech_params` and these shared series; they do not parse raw files directly.
 
 ## Adding Non-Technology Features
 

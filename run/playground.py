@@ -1,6 +1,7 @@
 """Primary execution entry point for local case runs."""
 
 import os
+from dataclasses import asdict
 from pathlib import Path
 
 from config import get_case_config
@@ -21,6 +22,10 @@ def main() -> int:
     else:
         solar_loaded = False
 
+    # Financial assumptions (debt/equity) from config so tech blocks can amortize capital
+    if case_cfg.financials is not None:
+        data.static["financials"] = asdict(case_cfg.financials)
+
     # --- TEMPORARY: viewable DataFrames for debugging (inspect df_data, df_static in Variables) ---
     import pandas as pd
     _datetimes = data.timeseries.get("datetime")
@@ -40,7 +45,7 @@ def main() -> int:
         print(f"Debug: wrote {_csv_path} (open in Excel or any spreadsheet)")
     # --- end temporary ---
 
-    model = build_model()
+    model = build_model(data)
 
     # Slice 2/3 loader smoke output for quick local verification.
     time_count = len(data.indices["time"])
@@ -52,7 +57,8 @@ def main() -> int:
     print(f"First time_serial: {first_serial:.6f}")
     print(f"First electricity load (kWh): {first_kwh:.5f} (key: {first_load_key})")
     print(f"Solar loaded: {solar_loaded}")
-    print(f"Model placeholder built: {model is None}")
+    has_solar_block = model is not None and hasattr(model, "solar_pv")
+    print(f"Model built: {model is not None} (solar_pv block: {has_solar_block})")
     return 0
 
 

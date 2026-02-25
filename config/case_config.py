@@ -3,6 +3,23 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+
+@dataclass(slots=True)
+class FinancialsConfig:
+    """User-configurable debt/equity financing for capital amortization.
+
+    Used by shared.financials to compute the annual payment factor. All fields
+    can be set in config (or case builder) so users can change financing assumptions.
+    """
+
+    debt_fraction: float = 0.5       # Fraction of capital from debt (0..1)
+    debt_years: float = 10.0        # Debt payback period (years)
+    debt_rate: float = 0.08         # Debt interest rate (e.g. 0.08 = 8%)
+    equity_years: float = 5.0       # Equity payback period (years)
+    equity_rate: float = 0.15       # Equity return rate (e.g. 0.15 = 15%)
+    # Years over which to levelize the equivalent annual payment (default: max of debt/equity years)
+    levelization_years: float | None = None  # None = use max(debt_years, equity_years)
+
 _LOAD_EXTENSIONS = (".csv", ".xlsx", ".xls")
 _LOAD_PATTERN = "loads"
 _SOLAR_PATTERN = "solar"
@@ -44,6 +61,8 @@ class CaseConfig:
     energy_load: EnergyLoadFileConfig
     # Optional resource profile files (e.g. solar.csv). Path only; loader infers format.
     solar_path: Path | None = None
+    # Financing assumptions for capital amortization (debt/equity). User-editable.
+    financials: FinancialsConfig | None = None  # None = use FinancialsConfig() defaults
 
 
 def discover_load_file(folder: Path) -> Path:

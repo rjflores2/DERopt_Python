@@ -12,7 +12,7 @@ From the project root:
 python -m run.playground
 ```
 
-This loads the default case (`igiugig`), loads energy demand data, builds the model, and runs. Output is printed to the console.
+This loads the default case (`igiugig_multi_node`), loads electricity load data (and solar if present for the case), builds the model, and runs. Output is printed to the console.
 
 ### Choose a different case
 
@@ -35,13 +35,19 @@ Available cases (as of this writing): `igiugig`, `igiugig multi node`, `igiugig 
 
 Input data lives in the `data/` folder (gitignored). Each case points to a subfolder, e.g. `data/Igiugig/`, `data/Igiugig_xlsx/`.
 
-### Energy load files
+### Electricity load files
 
 - Supported formats: CSV, XLSX, XLS
-- Required columns: datetime column (e.g. `Date`), load column (e.g. `Electric Demand (kW)`)
+- Required columns: datetime column (e.g. `Date`), one or more load columns with `(kW)` or `(kWh)` in the header (e.g. `Electric Demand (kW)`). Multiple columns (e.g. multi-node) are supported; duplicate headers are deduplicated.
+- All load data is stored in **kWh** in the model (kW from file is converted using the time step). Series keys: `electricity_load__{suffix}`; list in `data.static["electricity_load_keys"]`.
 - Datetime formats: strftime strings, `excel_serial`, `matlab_serial`, or `auto` (auto-detect from numeric values)
 - For a data folder, the loader auto-discovers files with `"loads"` in the filename (e.g. `Electric_Loads.xlsx`)
-- **Time conditioning** (optional): Set `target_interval_minutes=60` or `15` in `EnergyLoadFileConfig` to regularize timestamps to an hourly or 15-minute grid, fill NaN via interpolation, and treat negative values as missing. Use `target_interval_minutes=None` (default) to pass through raw data.
+- **Time conditioning** (optional): Set `target_interval_minutes=60` or `15` in `EnergyLoadFileConfig` to regularize timestamps when irregular; otherwise only NaN/negative filling is applied. Use `target_interval_minutes=None` (default) to keep native resolution.
+
+### Solar resource files (optional)
+
+- When a case has `solar_path` set, the loader reads a solar CSV and aligns it to the load time vector by time-of-year.
+- Output is **kWh per kW capacity** (kWh/kW): capacity factor from file × time step. Keys: `solar_production__{suffix}`; list in `data.static["solar_production_keys"]`; units in `data.static["solar_production_units"]` = `"kWh/kW"`.
 
 ## Adding a new case
 
@@ -100,5 +106,6 @@ No edits to `config/cases/__init__.py` or the playground are required; cases are
 ## More information
 
 - **Implementation plan**: `docs/deropt_python_pyomo_rebuild.md`
+- **Concrete slice steps**: `docs/implementation_slices_detailed.md`
 - **Requirements spec**: `requirements/deropt_rebuild_spec.md`
 - **Extending the model**: `docs/extending_the_model.md`
