@@ -17,8 +17,12 @@ class DataContainer:
         """Validate minimum fields required by early slices."""
         if "time" not in self.indices:
             raise ValueError("indices.time is required")
-        if "electricity_demand" not in self.timeseries:
-            raise ValueError("timeseries.electricity_demand is required")
         if "time_serial" not in self.timeseries:
             raise ValueError("timeseries.time_serial is required")
+        keys = self.static.get("electricity_load_keys") or []
+        if not keys:
+            raise ValueError("static.electricity_load_keys is required (non-empty)")
+        for key in keys:
+            if key not in self.timeseries:
+                raise ValueError(f"timeseries.{key} is required")
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 _LOAD_EXTENSIONS = (".csv", ".xlsx", ".xls")
 _LOAD_PATTERN = "loads"
+_SOLAR_PATTERN = "solar"
 
 
 @dataclass(slots=True)
@@ -41,6 +42,8 @@ class CaseConfig:
 
     case_name: str
     energy_load: EnergyLoadFileConfig
+    # Optional resource profile files (e.g. solar.csv). Path only; loader infers format.
+    solar_path: Path | None = None
 
 
 def discover_load_file(folder: Path) -> Path:
@@ -64,6 +67,32 @@ def discover_load_file(folder: Path) -> Path:
         raise FileNotFoundError(
             f"No load files (csv/xls/xlsx with 'loads' in name) found in {folder}"
         )
+    for ext in (".xlsx", ".csv", ".xls"):
+        for c in candidates:
+            if c.suffix.lower() == ext:
+                return c
+    return candidates[0]
+
+
+def discover_solar_file(folder: Path) -> Path | None:
+    """Find first csv/xlsx/xls file with 'solar' in name (case-insensitive).
+
+    Prefer xlsx > csv > xls. Returns None if no match (optional resource).
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return None
+    candidates: list[Path] = []
+    for f in folder.iterdir():
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in _LOAD_EXTENSIONS:
+            continue
+        if _SOLAR_PATTERN.lower() not in f.stem.lower():
+            continue
+        candidates.append(f)
+    if not candidates:
+        return None
     for ext in (".xlsx", ".csv", ".xls"):
         for c in candidates:
             if c.suffix.lower() == ext:

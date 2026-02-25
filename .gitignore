@@ -6,6 +6,7 @@ outputs/
 results/
 reports/
 artifacts/
+temp_debug_data.csv
 
 # Solver/model export artifacts
 *.lp

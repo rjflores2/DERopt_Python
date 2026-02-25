@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug DERopt playground (pyomo)",
+            "type": "python",
+            "request": "launch",
+
+            "program": "${workspaceFolder}/run/playground.py",
+
+            "cwd": "${workspaceFolder}",
+
+            "console": "internalConsole",
+
+            "justMyCode": true,
+
+            "env": {
+                "DEROPT_CASE": "igiugig_multi_node",
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    ]
+}

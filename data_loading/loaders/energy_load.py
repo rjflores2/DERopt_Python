@@ -1,4 +1,4 @@
-"""Loader for generic energy demand timeseries (CSV, xlsx, xls)."""
+"""Loader for generic electricity load timeseries (CSV, xlsx, xls). Units in model: kWh."""
 
 from __future__ import annotations
 
@@ -41,9 +41,14 @@ def _matlab_serial_to_datetime(serial: float) -> datetime:
 
 
 def _excel_serial_to_datetime(serial: float) -> datetime:
-    """Convert Excel-style serial day number to Python datetime (1900 date system)."""
-    # Excel 1 = Jan 1, 1900; epoch = Dec 31, 1899.
+    """Convert Excel-style serial day number to Python datetime (1900 date system).
+
+    Excel incorrectly treats 1900 as a leap year (serial 60 = Feb 29, 1900). For
+    serial >= 61 we subtract one day so Mar 1 1900 onward match Excel.
+    """
     epoch = datetime(1899, 12, 31, 0, 0, 0, 0)
+    if serial >= 61:
+        serial = serial - 1  # Excel 1900 leap-year bug: no real Feb 29 1900
     return epoch + timedelta(days=serial)
 
 
@@ -148,8 +153,9 @@ _NON_ALPHANUMERIC_PATTERN = re.compile(r"[^a-z0-9]+")
 
 
 def _normalize_series_key(header_name: str) -> str:
-    """Convert header text to a stable key suffix."""
-    return _NON_ALPHANUMERIC_PATTERN.sub("_", header_name.lower()).strip("_")
+    """Convert header text to a stable key suffix; use 'load' not 'demand' (kWh = load)."""
+    raw = _NON_ALPHANUMERIC_PATTERN.sub("_", header_name.lower()).strip("_")
+    return raw.replace("demand", "load")
 
 
 def _deduplicate_headers(fieldnames: list[str]) -> list[str]:
@@ -166,7 +172,7 @@ def _deduplicate_headers(fieldnames: list[str]) -> list[str]:
 def _resolve_load_columns(
     fieldnames: list[str], configured_column: str, csv_path: Path
 ) -> list[str]:
-    """Resolve load columns by explicit/fallback unit-based detection."""
+    """Resolve load columns by explicit config or (kW)/(kWh) in header. Duplicate headers are deduplicated earlier (e.g. 'Electric Demand (kW) [2]'), so all matching columns are included."""
     matched_unit_columns = [name for name in fieldnames if _UNIT_IN_PARENTHESES_PATTERN.search(name)]
     selected: list[str] = []
 
@@ -180,7 +186,7 @@ def _resolve_load_columns(
 
     raise ValueError(
         f"Missing required load column '{configured_column}' in {csv_path}. "
-        f"No fallback '(kW)'/'(kWh)' column was detected. Found columns: {fieldnames}"
+        f"No '(kW)' or '(kWh)' column was detected. Found columns: {fieldnames}"
     )
 
 
@@ -258,12 +264,12 @@ def _condition_time_series(
     return new_dtimes, new_series
 
 
-def load_energy_demand(cfg: EnergyLoadFileConfig) -> DataContainer:
-    """Load energy demand from a CSV or Excel file (.csv, .xlsx, .xls) into a DataContainer.
+def load_energy_load(cfg: EnergyLoadFileConfig) -> DataContainer:
+    """Load electricity load (kWh) from a CSV or Excel file (.csv, .xlsx, .xls) into a DataContainer.
 
     Expected columns:
     - cfg.datetime_column (default: Date)
-    - cfg.load_column (default: Electric Demand (kW))
+    - cfg.load_column (default: Electric Demand (kW)); file may use demand/kW, we convert to kWh.
     """
     file_path = Path(cfg.csv_path) # Get the file path from the configuration
     if not file_path.exists(): # If the file path does not exist, raise an error
@@ -316,14 +322,12 @@ def load_energy_demand(cfg: EnergyLoadFileConfig) -> DataContainer:
         dt = _parse_datetime_cell(dt_raw, fmt, row_idx, file_path) # Parse the datetime column
 
         parsed_row_values: dict[str, float] = {} # Initialize the parsed row values
-        any_value_present = False # Initialize the any value present flag
         for col in load_columns: # Iterate over the load columns
             load_val = row.get(col) # Get the load value from the row
             if load_val is None or (isinstance(load_val, float) and pd.isna(load_val)): # If the load value is not found or is NaN, continue
                 continue
             if isinstance(load_val, str) and not load_val.strip(): # If the load value is an empty string, continue
                 continue
-            any_value_present = True # Set the any value present flag to True
             try:
                 parsed_row_values[col] = float(load_val) # Parse the load value as a float
             except (ValueError, TypeError) as exc:
@@ -331,10 +335,8 @@ def load_energy_demand(cfg: EnergyLoadFileConfig) -> DataContainer:
                     f"Row {row_idx}: failed float parse for column '{col}' value '{load_val!r}'"
                 ) from exc
 
-        if not any_value_present: # If no value is present, continue
-            continue
-
-        fill_missing = math.nan if cfg.target_interval_minutes is not None else 0.0 # Determine the fill missing value based on the configuration
+        # Keep datetime rows even when all load values are missing so interpolation can restore gaps.
+        fill_missing = math.nan
         datetimes.append(dt) # Add the datetime to the datetimes list
         for col in load_columns:
             series_values[col].append(parsed_row_values.get(col, fill_missing)) # Add the load value to the series values
@@ -356,36 +358,42 @@ def load_energy_demand(cfg: EnergyLoadFileConfig) -> DataContainer:
     datetimes, sorted_series = _condition_time_series(datetimes, sorted_series, cfg) # Condition the time series
 
     # Basic regular-step check (used by downstream resampling/alignment slices).
-    dt_hours = None # Initialize the time step hours
-    if len(datetimes) >= 2: # If there are at least two datetimes, calculate the time step hours    
-        dt_seconds = (datetimes[1] - datetimes[0]).total_seconds() # Calculate the time step seconds        
-        dt_hours = dt_seconds / 3600.0 # Convert the time step seconds to hours
+    dt_hours = None
+    if len(datetimes) >= 2:
+        dt_seconds = (datetimes[1] - datetimes[0]).total_seconds()
+        dt_hours = dt_seconds / 3600.0
 
-    primary_column = load_columns[0] # Get the primary load column  
-    timeseries = { # Create a dictionary of the timeseries  
+    # Convert kW (power) to kWh (energy) for model: Energy = Power × time_step_hours.
+    if dt_hours is not None:
+        for col in load_columns:
+            if series_units[col] == "kW":
+                sorted_series[col] = [v * dt_hours for v in sorted_series[col]]
+                series_units[col] = "kWh"
+
+    # One series per load column: electricity_load__{suffix}. Model uses all of them (1 or N).
+    load_keys: list[str] = []
+    timeseries: dict[str, list[float]] = {
         "datetime": datetimes,
         "time_serial": [_datetime_to_matlab_serial(dt) for dt in datetimes],
-        # Backwards-compatible alias expected by existing validation.
-        "electricity_demand": sorted_series[primary_column],
     }
-    for col in load_columns: # Iterate over the load columns
-        suffix = _normalize_series_key(col) # Normalize the series key
-        timeseries[f"electricity_demand__{suffix}"] = sorted_series[col]
+    for col in load_columns:
+        suffix = _normalize_series_key(col)
+        key = f"electricity_load__{suffix}"
+        load_keys.append(key)
+        timeseries[key] = sorted_series[col]
 
-    unique_units = sorted(set(series_units.values())) # Get the unique units
-    load_units = unique_units[0] if len(unique_units) == 1 else "mixed"
-
-    container = DataContainer( # Create a data container that is shared with the rest of the model 
+    # Model and data object always use kWh (we convert kW→kWh when needed).
+    container = DataContainer(
         indices={"time": list(range(len(datetimes)))},
         timeseries=timeseries,
         static={
             "time_step_hours": dt_hours,
-            "load_units": load_units,
+            "load_units": "kWh",
             "load_units_by_series": {
-                _normalize_series_key(col): unit for col, unit in series_units.items()
+                _normalize_series_key(col): "kWh" for col in load_columns
             },
             "load_columns": load_columns,
-            "primary_load_column": primary_column,
+            "electricity_load_keys": load_keys,
         },
         tech_params={},
     )
