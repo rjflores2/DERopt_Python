@@ -11,7 +11,6 @@ class DataContainer:
     indices: dict[str, Any] = field(default_factory=dict)
     timeseries: dict[str, Any] = field(default_factory=dict)
     static: dict[str, Any] = field(default_factory=dict)
-    tech_params: dict[str, Any] = field(default_factory=dict)
 
     def validate_minimum_fields(self) -> None:
         """Validate minimum fields required by early slices."""

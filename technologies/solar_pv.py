@@ -25,7 +25,7 @@ from shared.financials import annualization_factor_debt_equity
 
 
 # -----------------------------------------------------------------------------
-# Default parameters (used when data.tech_params["solar_pv"] does not supply them)
+# Default parameters (used when solar_pv_params does not supply overrides)
 # -----------------------------------------------------------------------------
 
 DEFAULT_SOLAR_PV_PARAMS = {
@@ -43,12 +43,12 @@ DEFAULT_SOLAR_PV_PARAMS = {
 # Multiple solar technologies (e.g. fixed vs 1-D tracking)
 # -----------------------------------------------------------------------------
 # When you have more than one solar profile, each can have its own efficiency,
-# capital cost, and O&M. Set data.tech_params["solar_pv"]
+# capital cost, and O&M. Set solar_pv_params (typically from case config)
 # and add "params_by_profile" in one of two ways:
 #
 # Option A — By profile key (use the same keys as in data.static["solar_production_keys"]):
 #
-#   data.tech_params["solar_pv"] = {
+#   solar_pv_params = {
 #       "max_capacity_area": 10_000,
 #       "params_by_profile": {
 #           "solar_production__fixed_kw_kw": {
@@ -66,7 +66,7 @@ DEFAULT_SOLAR_PV_PARAMS = {
 #
 # Option B — By load order (first dict = first profile, second = second, etc.):
 #
-#   data.tech_params["solar_pv"] = {
+#   solar_pv_params = {
 #       "max_capacity_area": 10_000,
 #       "params_by_profile": [
 #           {"efficiency": 0.20, "capital_cost_per_kw": 1500, "om_per_kw_year": 18},   # fixed
@@ -75,10 +75,10 @@ DEFAULT_SOLAR_PV_PARAMS = {
 #   }
 #
 # You can override only some fields per profile; the rest come from defaults or
-# from the top-level tech_params["solar_pv"] (e.g. "max_capacity_area" applies to all).
+# from top-level solar_pv_params (e.g. "max_capacity_area" applies to all).
 #
 # Existing capacity is NOT set per-profile here. It is per (node, profile). Use
-# existing_solar_capacity_by_node_and_profile in tech_params["solar_pv"] to specify
+# existing_solar_capacity_by_node_and_profile in solar_pv_params to specify
 # which nodes have existing solar (default 0 at every node).
 
 
@@ -96,7 +96,7 @@ def _params_per_profile(solar_keys: list, global_params: dict) -> tuple[list, li
     Inputs
     ------
     solar_keys : list of profile IDs (e.g. from data.static["solar_production_keys"]).
-    global_params : tech_params["solar_pv"] already merged with DEFAULT_SOLAR_PV_PARAMS.
+    global_params : solar_pv_params already merged with DEFAULT_SOLAR_PV_PARAMS.
 
     Per-profile overrides live in global_params["params_by_profile"]:
     - None or missing : use global values for all profiles.
@@ -139,7 +139,13 @@ def _params_per_profile(solar_keys: list, global_params: dict) -> tuple[list, li
 # Block builder
 # -----------------------------------------------------------------------------
 
-def add_solar_pv_block(model: Any, data: Any) -> pyo.Block:
+def add_solar_pv_block(
+    model: Any,
+    data: Any,
+    *,
+    solar_pv_params: dict[str, Any] | None = None,
+    financials: dict[str, Any] | None = None,
+) -> pyo.Block:
     """
     Build and attach the Solar PV block to the model.
 
@@ -151,7 +157,7 @@ def add_solar_pv_block(model: Any, data: Any) -> pyo.Block:
         - data.static["electricity_load_keys"] -> node set (one node per load)
         - data.static["solar_production_keys"], data.timeseries["solar_production__*"]
           -> one potential (kWh/kW) per profile per time step
-        - data.tech_params["solar_pv"]   -> optional overrides; params_by_profile for per-profile params
+        - solar_pv_params   -> optional overrides; params_by_profile for per-profile params
 
     Block contents:
         - Sets: NODES, SOLAR (profiles)
@@ -188,7 +194,7 @@ def add_solar_pv_block(model: Any, data: Any) -> pyo.Block:
     }
 
     # ----- Resolve technical and financial parameters -----
-    params = (data.tech_params.get("solar_pv") or {}).copy()
+    params = (solar_pv_params or {}).copy()
     for k, v in DEFAULT_SOLAR_PV_PARAMS.items():
         params.setdefault(k, v)
 
@@ -212,7 +218,7 @@ def add_solar_pv_block(model: Any, data: Any) -> pyo.Block:
             existing_init[(n, p)] = val
 
     # Capital amortization
-    fin = data.static.get("financials") or {}
+    fin = financials or {}
     amortization_factor = annualization_factor_debt_equity(**fin)
 
     # ----- Block rule -----
@@ -301,7 +307,13 @@ def add_solar_pv_block(model: Any, data: Any) -> pyo.Block:
     return model.solar_pv
 
 
-def register(model: Any, data: Any) -> pyo.Block | None:
+def register(
+    model: Any,
+    data: Any,
+    *,
+    solar_pv_params: dict[str, Any] | None = None,
+    financials: dict[str, Any] | None = None,
+) -> pyo.Block | None:
     """
     Attach the Solar PV block if solar data is present; otherwise do nothing.
 
@@ -309,4 +321,9 @@ def register(model: Any, data: Any) -> pyo.Block | None:
     """
     if not data.static.get("solar_production_keys"):
         return None
-    return add_solar_pv_block(model, data)
+    return add_solar_pv_block(
+        model,
+        data,
+        solar_pv_params=solar_pv_params,
+        financials=financials,
+    )

@@ -15,8 +15,13 @@ if TYPE_CHECKING:
     from data_loading.schemas import DataContainer
 
 
-def build_model(data: DataContainer | None = None) -> pyo.ConcreteModel | None:
-    """Build a Pyomo model with time set T. If data is provided and has solar data, attach the Solar PV block.
+def build_model(
+    data: DataContainer | None = None,
+    *,
+    technology_parameters: dict[str, Any] | None = None,
+    financials: dict[str, Any] | None = None,
+) -> pyo.ConcreteModel | None:
+    """Build a Pyomo model with time set T and attach technology blocks when data supports them.
 
     Returns:
         ConcreteModel with model.T (time set) and optionally model.solar_pv (Block).
@@ -31,6 +36,12 @@ def build_model(data: DataContainer | None = None) -> pyo.ConcreteModel | None:
     # Attach technology blocks when data supports them
     from technologies.solar_pv import register as register_solar_pv
 
-    register_solar_pv(model, data)
+    tech_params = technology_parameters or {}
+    register_solar_pv(
+        model,
+        data,
+        solar_pv_params=(tech_params.get("solar_pv") or {}),
+        financials=(financials or {}),
+    )
 
     return model

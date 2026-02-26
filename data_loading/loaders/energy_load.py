@@ -395,7 +395,6 @@ def load_energy_load(cfg: EnergyLoadFileConfig) -> DataContainer:
             "load_columns": load_columns,
             "electricity_load_keys": load_keys,
         },
-        tech_params={},
     )
     container.validate_minimum_fields()
     return container

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -61,6 +62,9 @@ class CaseConfig:
     energy_load: EnergyLoadFileConfig
     # Optional resource profile files (e.g. solar.csv). Path only; loader infers format.
     solar_path: Path | None = None
+    # Optional technology parameters by technology name, e.g. {"solar_pv": {...}}.
+    # Values override technology defaults defined in each technology module.
+    technology_parameters: dict[str, dict[str, Any]] | None = None
     # Financing assumptions for capital amortization (debt/equity). User-editable.
     financials: FinancialsConfig | None = None  # None = use FinancialsConfig() defaults
 

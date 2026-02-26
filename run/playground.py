@@ -22,9 +22,10 @@ def main() -> int:
     else:
         solar_loaded = False
 
-    # Financial assumptions (debt/equity) from config so tech blocks can amortize capital
-    if case_cfg.financials is not None:
-        data.static["financials"] = asdict(case_cfg.financials)
+    # Technology/economic inputs are passed explicitly to the model builder,
+    # separate from measured data in DataContainer.
+    technology_parameters = case_cfg.technology_parameters or {}
+    financials = asdict(case_cfg.financials) if case_cfg.financials is not None else {}
 
     # --- TEMPORARY: viewable DataFrames for debugging (inspect df_data, df_static in Variables) ---
     import pandas as pd
@@ -45,7 +46,11 @@ def main() -> int:
         print(f"Debug: wrote {_csv_path} (open in Excel or any spreadsheet)")
     # --- end temporary ---
 
-    model = build_model(data)
+    model = build_model(
+        data,
+        technology_parameters=technology_parameters,
+        financials=financials,
+    )
 
     # Slice 2/3 loader smoke output for quick local verification.
     time_count = len(data.indices["time"])
