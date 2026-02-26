@@ -226,8 +226,7 @@ def add_solar_pv_block(
     Same solar potential profile is used at every node (no per-node irradiance data yet).
 
     Data used:
-        - data.indices["time"]          -> time set T
-        - data.static["electricity_load_keys"] -> node set (one node per load)
+        - model.T, model.NODES          -> time set and node set (created in core from data)
         - data.static["solar_production_keys"], data.timeseries["solar_production__*"]
           -> one potential (kWh/kW) per profile per time step
         - solar_pv_params   -> optional overrides; params_by_profile for per-profile params
@@ -243,27 +242,23 @@ def add_solar_pv_block(
         - electricity_supply_term[node, t]: sum over profiles of solar_generation[node, profile, t] for balance at that node
     """
     # ----- Indices and time series from data -----
-    if not hasattr(model, "T"):
-        model.T = pyo.Set(initialize=range(len(data.indices["time"])), ordered=True)
     T = model.T
+    NODES = list(model.NODES)  # model.NODES is created in core from electricity_load_keys
 
-    load_keys = data.static.get("electricity_load_keys") or []
-    if not load_keys:
-        raise ValueError("solar_pv block requires data.static['electricity_load_keys'] (load data first)")
-    NODES = list(load_keys)
-
-    solar_keys = data.static.get("solar_production_keys") or []
-    if not solar_keys:
+    solar_keys = data.static.get("solar_production_keys") or [] # Get the solar production keys, which are data labels in the data structure for each individual solar technology
+    if not solar_keys: # If there are no solar production keys, raise an error - THERE HAS TO BE A SOLAR TECHNOLOGY! OBVI!!
         raise ValueError("solar_pv block requires data.static['solar_production_keys'] (load solar data first)")
     SOLAR = list(solar_keys)
     production_by_profile = {key: list(data.timeseries[key]) for key in SOLAR}
 
     # ----- Resolved technology parameters (defaults + overrides) -----
-    r = _resolve_solar_block_inputs(solar_pv_params, financials, NODES, SOLAR)
+    r = _resolve_solar_block_inputs(solar_pv_params, financials, NODES, SOLAR) # Resolve the technology parameters for the solar PV technology
 
     # ----- Block rule -----
+    # Use model.NODES (from core) for node indexing; only SOLAR is block-local.
+    _nodes = model.NODES
+
     def block_rule(b):
-        b.NODES = pyo.Set(initialize=NODES, ordered=True)
         b.SOLAR = pyo.Set(initialize=SOLAR, ordered=True)
 
         b.solar_potential = pyo.Param(
@@ -287,7 +282,7 @@ def add_solar_pv_block(
             within=pyo.NonNegativeReals, mutable=True,
         )
         b.existing_solar_capacity = pyo.Param(
-            b.NODES, b.SOLAR,
+            _nodes, b.SOLAR,
             initialize=r.existing_init,
             within=pyo.NonNegativeReals, mutable=True,
         )
@@ -296,15 +291,15 @@ def add_solar_pv_block(
                 initialize=r.max_capacity_area, within=pyo.NonNegativeReals, mutable=True
             )
 
-        b.solar_capacity_adopted = pyo.Var(b.NODES, b.SOLAR, within=pyo.NonNegativeReals)
-        b.solar_generation = pyo.Var(b.NODES, b.SOLAR, T, within=pyo.NonNegativeReals)
+        b.solar_capacity_adopted = pyo.Var(_nodes, b.SOLAR, within=pyo.NonNegativeReals)
+        b.solar_generation = pyo.Var(_nodes, b.SOLAR, T, within=pyo.NonNegativeReals)
 
         def generation_limits_rule(m, node, profile, t):
             return m.solar_generation[node, profile, t] <= (
                 (m.existing_solar_capacity[node, profile] + m.solar_capacity_adopted[node, profile])
                 * m.solar_potential[profile, t] * m.efficiency[profile]
             )
-        b.generation_limits = pyo.Constraint(b.NODES, b.SOLAR, T, rule=generation_limits_rule)
+        b.generation_limits = pyo.Constraint(_nodes, b.SOLAR, T, rule=generation_limits_rule)
 
         if r.has_area_limit:
             def capacity_area_cap_rule(m, node):
@@ -312,15 +307,15 @@ def add_solar_pv_block(
                     (m.existing_solar_capacity[node, p] + m.solar_capacity_adopted[node, p]) / m.efficiency[p]
                     for p in m.SOLAR
                 ) <= m.max_capacity_area
-            b.capacity_area_cap = pyo.Constraint(b.NODES, rule=capacity_area_cap_rule)
+            b.capacity_area_cap = pyo.Constraint(_nodes, rule=capacity_area_cap_rule)
 
         b.objective_contribution = sum(
             b.capital_cost_per_kw[p] * b.solar_capacity_adopted[n, p] * r.amortization_factor
             + b.om_per_kw_year[p] * b.solar_capacity_adopted[n, p]
-            for n in b.NODES for p in b.SOLAR
+            for n in _nodes for p in b.SOLAR
         )
         b.electricity_supply_term = pyo.Expression(
-            b.NODES, T,
+            _nodes, T,
             rule=lambda m, n, t: sum(m.solar_generation[n, p, t] for p in m.SOLAR),
         )
 
