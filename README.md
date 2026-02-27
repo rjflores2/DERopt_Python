@@ -49,6 +49,25 @@ Input data lives in the `data/` folder (gitignored). Each case points to a subfo
 - When a case has `solar_path` set, the loader reads a solar CSV and aligns it to the load time vector by time-of-year.
 - Output is **kWh per kW capacity** (kWh/kW): capacity factor from file × time step. Keys: `solar_production__{suffix}`; list in `data.static["solar_production_keys"]`; units in `data.static["solar_production_units"]` = `"kWh/kW"`.
 
+### Technology parameters (solar)
+
+Solar technoeconomic parameters (efficiency, capital cost, O&M, area limits (per profile)) are set via case config’s `technology_parameters["solar_pv"]`; defaults live in `technologies/solar_pv.py`. When you have multiple solar profiles (e.g. fixed and 1-D tracking), give each its own values by setting **`params_by_profile`** to a **list in the same order as your solar data columns** (first list entry = first profile, second = second, etc.). Each profile can have its own area limit via **`max_capacity_area_by_profile`** (list in SOLAR order)—e.g. south-facing vs east-facing roof area:
+
+```python
+# Example: two profiles (e.g. fixed, then 1-D tracking) — order must match solar_production_keys
+technology_parameters={
+    "solar_pv": {
+        "max_capacity_area_by_profile": [500, 300],  # area limit per profile (e.g. south roof, east roof)
+        "params_by_profile": [
+            {"efficiency": 0.20, "capital_cost_per_kw": 1500, "om_per_kw_year": 18},
+            {"efficiency": 0.22, "capital_cost_per_kw": 2100, "om_per_kw_year": 24},
+        ],
+    },
+}
+```
+
+You can override only some fields per profile; the rest come from the top-level `solar_pv` dict or from defaults. Existing capacity is per (node, profile): set **`existing_solar_capacity_by_node_and_profile`** to `{(node_key, profile_key): kW}` or `{node_key: {profile_key: kW}}`; default is 0 at every node.
+
 ## Adding a new case
 
 1. **Create the case module**  
