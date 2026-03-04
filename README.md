@@ -49,6 +49,23 @@ Input data lives in the `data/` folder (gitignored). Each case points to a subfo
 - When a case has `solar_path` set, the loader reads a solar CSV and aligns it to the load time vector by time-of-year.
 - Output is **kWh per kW capacity** (kWh/kW): capacity factor from file × time step. Keys: `solar_production__{suffix}`; list in `data.static["solar_production_keys"]`; units in `data.static["solar_production_units"]` = `"kWh/kW"`.
 
+#### Standard solar profile labels
+
+Use consistent column names in solar CSVs so case config (e.g. `max_capacity_area_by_node_and_profile`, `params_by_profile`) can refer to the same keys across sites. Column headers are normalized to a key suffix (lowercase, non-alphanumeric → underscore). Recommended labels:
+
+| Profile | Recommended CSV column | Resulting key |
+|--------|------------------------|---------------|
+| 1-D tracking | `1D Tracking` or `1d_tracking` | `solar_production__1d_tracking` |
+| 2-D tracking | `2D Tracking` or `2d_tracking` | `solar_production__2d_tracking` |
+| Fixed, optimal tilt/orientation | `Fixed Optimal` or `fixed_optimal` | `solar_production__fixed_optimal` |
+| Fixed south | `Fixed South` or `fixed_south` | `solar_production__fixed_south` |
+| Fixed north | `Fixed North` or `fixed_north` | `solar_production__fixed_north` |
+| Fixed east | `Fixed East` or `fixed_east` | `solar_production__fixed_east` |
+| Fixed west | `Fixed West` or `fixed_west` | `solar_production__fixed_west` |
+| Flat (horizontal) | `Flat` or `fixed_flat` | `solar_production__flat` or `solar_production__fixed_flat` |
+
+Use the **resulting key** in config when keying by profile name (e.g. in `max_capacity_area_by_node_and_profile`). Order of columns in the CSV sets the order in `solar_production_keys` for list-based config (e.g. `params_by_profile`).
+
 ### Technology parameters (solar)
 
 Solar technoeconomic parameters (efficiency, capital cost, O&M, area limits (per profile)) are set via case config’s `technology_parameters["solar_pv"]`; defaults live in `technologies/solar_pv.py`. When you have multiple solar profiles (e.g. fixed and 1-D tracking), give each its own values by setting **`params_by_profile`** to a **list in the same order as your solar data columns** (first list entry = first profile, second = second, etc.). Each profile can have its own area limit via **`max_capacity_area_by_profile`** (list in SOLAR order)—e.g. south-facing vs east-facing roof area:

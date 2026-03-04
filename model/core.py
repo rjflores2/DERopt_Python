@@ -23,6 +23,11 @@ def build_model(
 ) -> pyo.ConcreteModel | None:
     """Build a Pyomo model with time set T and attach technology blocks when data supports them.
 
+    Only technologies listed in technology_parameters (with a non-None value) are included.
+    Omit a key to exclude that technology; use {} for defaults or a dict for overrides.
+    Example: technology_parameters = {"solar_pv": {}, "diesel_generation": {...}}
+    gives solar (defaults) and diesel (with params); all other techs are off.
+
     Returns:
         ConcreteModel with model.T (time set), model.NODES (one per load), and optionally
         model.solar_pv (Block). Returns None if data is None (backward compatibility).
@@ -38,15 +43,19 @@ def build_model(
         raise ValueError("model requires data.static['electricity_load_keys'] (load data first)")
     model.NODES = pyo.Set(initialize=list(load_keys), ordered=True)
 
-    # Attach technology blocks when data supports them
-    from technologies.solar_pv import register as register_solar_pv
+    # Attach technology blocks: only techs present in technology_parameters (value not None) are included.
+    from technologies import REGISTRY
 
     tech_params = technology_parameters or {}
-    register_solar_pv(
-        model,
-        data,
-        solar_pv_params=(tech_params.get("solar_pv") or {}),
-        financials=(financials or {}),
-    )
+    fin = financials or {}
+    for key, register_fn in REGISTRY:
+        if tech_params.get(key) is None:
+            continue
+        register_fn(
+            model,
+            data,
+            technology_parameters=tech_params,
+            financials=fin,
+        )
 
     return model
