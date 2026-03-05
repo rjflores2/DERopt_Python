@@ -83,7 +83,7 @@ def add_solar_pv_block(
           if max_capacity_area_by_node_and_profile is set: per (node, profile),
           (existing+adopted)/efficiency[profile] <= area_limit[node, profile]
         - objective_contribution: annual cost summed over nodes and profiles
-        - electricity_supply_term[node, t]: sum over profiles of solar_generation[node, profile, t] for balance at that node
+        - electricity_source_term[node, t]: sum over profiles of solar_generation[node, profile, t] (source for balance)
     """
     # ----- Indices and time series from data -----
     T = model.T
@@ -188,7 +188,7 @@ def add_solar_pv_block(
                 for n in _nodes for p in b.SOLAR
             )
 
-        b.electricity_supply_term = pyo.Expression(
+        b.electricity_source_term = pyo.Expression(
             _nodes, T,
             rule=lambda m, n, t: sum(m.solar_generation[n, p, t] for p in m.SOLAR),
         )
@@ -197,7 +197,7 @@ def add_solar_pv_block(
     return model.solar_pv
 
 
-def register(
+def register( # Register adds the solar PV pyomo block is there if solar data is present, otherwise it returns None
     model: Any,
     data: Any,
     *,
@@ -210,14 +210,14 @@ def register(
     Called by core from the technology registry. Params are read from
     technology_parameters["solar_pv"]. Returns the block if attached, None otherwise.
     """
-    if not data.static.get("solar_production_keys"):
+    if not data.static.get("solar_production_keys"): # If there is no solar production keys, then return None
         return None
-    solar_pv_params = (technology_parameters or {}).get("solar_pv") or {}
-    return add_solar_pv_block(
+    solar_pv_params = (technology_parameters or {}).get("solar_pv") or {} #Else get the solar PV parameters from either the user input in the config file, or the default parameters
+    return add_solar_pv_block( # Add the solar PV pyomo block to the model
         model,
         data,
-        solar_pv_params=solar_pv_params,
-        financials=financials or {},
+        solar_pv_params=solar_pv_params, # Pass the solar PV parameters to the add_solar_pv_block function
+        financials=financials or {}, # Pass the financials to the add_solar_pv_block function
     )
 
 
@@ -229,7 +229,8 @@ def _params_per_profile(solar_keys: list, global_params: dict) -> tuple[list, li
     """
     Purpose
     -------
-    The model has one solar "profile" per technology (e.g. fixed, 1-D tracking). Each
+    The model has one solar "profile" per technology (e.g. fixed, 1-D tracking technology
+     each have a cost, efficiency, etc.). Each
     profile can have different technical/economic parameters. This function turns the
     user's config (global defaults + optional per-profile overrides) into three lists,
     one value per profile in solar_keys order. The block builder then uses these lists
@@ -253,29 +254,29 @@ def _params_per_profile(solar_keys: list, global_params: dict) -> tuple[list, li
     Existing capacity is not handled here; it is per (node, profile) and is set in the
     block from existing_solar_capacity_by_node_and_profile (default 0 at every node).
     """
-    by_profile = global_params.get("params_by_profile")
+    by_profile = global_params.get("params_by_profile") #Global parameters for the solar PV technology, which are inputs to build_solar_pv_block function   this is a list of dictionaries, each dictionary contains the efficiency, capital cost, and O&M cost for a single solar technology   
 
-    efficiency_list = []
-    capital_list = []
-    om_list = []
+    efficiency_list = [] # This is a list of efficiencies for each profile, which is the efficiency of the solar technology at the node and profile at the time step
+    capital_list = [] # This is a list of capital costs for each profile, which is the capital cost of the solar technology at the node and profile at the time step
+    om_list = [] # This is a list of O&M costs for each profile, which is the O&M cost of the solar technology at the node and profile at the time step
 
-    for i, key in enumerate(solar_keys):
+    for i, key in enumerate(solar_keys): # Looping through the solar keys, which are the headers from the solar resource time series data
         # Per-profile override: by key or by index
-        if by_profile is None:
+        if by_profile is None: # If there are no global parameters for the solar PV technology, then set the overrides to an empty dictionary
             overrides = {}
-        elif isinstance(by_profile, dict):
+        elif isinstance(by_profile, dict): # If the global parameters for the solar PV technology are a dictionary, then set the overrides to the dictionary for the key
             overrides = (by_profile.get(key) or {}).copy()
-        elif isinstance(by_profile, list) and i < len(by_profile):
+        elif isinstance(by_profile, list) and i < len(by_profile): # If the global parameters for the solar PV technology are a list, then set the overrides to the list for the index
             overrides = (by_profile[i] or {}).copy()
         else:
-            overrides = {}
+            overrides = {} # If there are no global parameters for the solar PV technology, then set the overrides to an empty dictionary
 
-        p = {**global_params, **overrides}
-        efficiency_list.append(float(p["efficiency"]))
-        capital_list.append(float(p["capital_cost_per_kw"]))
-        om_list.append(float(p["om_per_kw_year"]))
+        p = {**global_params, **overrides} # This is a dictionary of the global parameters for the solar PV technology and the overrides for the profile
+        efficiency_list.append(float(p["efficiency"])) # This is a list of efficiencies for each profile, which is the efficiency of the solar technology at the node and profile at the time step
+        capital_list.append(float(p["capital_cost_per_kw"])) # This is a list of capital costs for each profile, which is the capital cost of the solar technology at the node and profile at the time step
+        om_list.append(float(p["om_per_kw_year"])) # This is a list of O&M costs for each profile, which is the O&M cost of the solar technology at the node and profile at the time step
 
-    return efficiency_list, capital_list, om_list
+    return efficiency_list, capital_list, om_list # Return the list of efficiencies, capital costs, and O&M costs for each profile
 
 
 def _resolve_existing_capacity(
@@ -302,68 +303,61 @@ def _resolve_existing_capacity(
 
 
 @dataclass
-class _ResolvedSolarInputs:
+class _ResolvedSolarInputs: #This data class is used to store the resolved solar block inputs for the solar PV technology
     """All parameter-derived inputs for the solar block (no time series)."""
 
-    efficiency_list: list[float]
-    capital_list: list[float]
-    om_list: list[float]
-    existing_init: dict[tuple[str, str], float]
-    has_area_limits: bool
+    efficiency_list: list[float] # This is a list of efficiencies for each profile, which is the efficiency of the solar technology at the node and profile at the time step
+    capital_list: list[float] # This is a list of capital costs for each profile, which is the capital cost of the solar technology at the node and profile at the time step
+    om_list: list[float] # This is a list of O&M costs for each profile, which is the O&M cost of the solar technology at the node and profile at the time step
+    existing_init: dict[tuple[str, str], float] # This is a dictionary of the existing solar capacity for each node and profile, which is the existing solar capacity of the solar technology at the node and profile at the time step
+    has_area_limits: bool # This is a boolean flag to indicate if there are area limits for the solar PV technology
     area_index: list[tuple[str, str]]  # list of (node, profile) pairs with area limits
-    max_capacity_area_by_node_profile: dict[tuple[str, str], float]
-    amortization_factor: float
+    max_capacity_area_by_node_profile: dict[tuple[str, str], float] # This is a dictionary of the maximum capacity area for each node and profile, which is the maximum capacity area of the solar technology at the node and profile at the time step
+    amortization_factor: float # This is the amortization factor for the solar PV technology, which is the amortization factor for the solar PV technology
 
 
-def _resolve_solar_block_inputs(
-    solar_pv_params: dict[str, Any] | None,
-    financials: dict[str, Any] | None,
-    nodes: list[str],
-    solar: list[str],
-) -> _ResolvedSolarInputs:
+def _resolve_solar_block_inputs( #Merges default parameters with user inputs and resolves the per-profile and per-node parameters for the solar PV technology
+    solar_pv_params: dict[str, Any] | None, # This is the solar PV parameters for the solar PV technology
+    financials: dict[str, Any] | None, # This is the financials for the solar PV technology
+    nodes: list[str], # This is the list of nodes for the solar PV technology
+    solar: list[str], # This is the list of solar technologies for the solar PV technology
+) -> _ResolvedSolarInputs: # This is the resolved solar block inputs for the solar PV technology
     """
-    Merge defaults with user overrides and resolve per-profile and per-node params.
+    Merge defaults with user overrides and resolve per-profile and per-node parameters.
     Returns a single object used by add_solar_pv_block to build the Pyomo block.
     """
-    params = (solar_pv_params or {}).copy()
-    for k, v in DEFAULT_SOLAR_PV_PARAMS.items():
+    params = (solar_pv_params or {}).copy() # This is a dictionary of the solar PV parameters for the solar PV technology
+    for k, v in DEFAULT_SOLAR_PV_PARAMS.items(): # This is a dictionary of the default solar PV parameters for the solar PV technology
         params.setdefault(k, v)
 
-    efficiency_list, capital_list, om_list = _params_per_profile(solar, params)
+    efficiency_list, capital_list, om_list = _params_per_profile(solar, params) # This is a list of efficiencies, capital costs, and O&M costs for each profile
 
     # Per-node, per-profile area limits: {(node, profile): area} or {node: {profile: area}}.
-    area_raw = params.get("max_capacity_area_by_node_and_profile") or {}
-    area_index: list[tuple[str, str]] = []
-    max_capacity_area_by_node_profile: dict[tuple[str, str], float] = {}
-    for n in nodes:
-        for p in solar:
-            val = None
-            if isinstance(area_raw.get(n), dict):
-                val = area_raw[n].get(p)
-            elif (n, p) in area_raw:
-                val = area_raw[(n, p)]
-            if val is None:
-                continue
-            if val < 0:
-                continue
-            pair = (n, p)
-            area_index.append(pair)
-            max_capacity_area_by_node_profile[pair] = float(val)
+    area_raw = params.get("max_capacity_area_by_node_and_profile") or {} # This is a dictionary of the maximum capacity area for each node and profile
+    area_index: list[tuple[str, str]] = [] # This is a list of (node, profile) pairs with area limits      
+    max_capacity_area_by_node_profile: dict[tuple[str, str], float] = {} # This is a dictionary of the maximum capacity area for each node and profile
+    for n in nodes: # Looping through the nodes for the solar PV technology
+        for p in solar: # Looping through the solar technologies for the solar PV technology
+            val = None # This is the value of the maximum capacity area for the node and profile
+            if isinstance(area_raw.get(n), dict): # If the maximum capacity area for the node is a dictionary, then get the value of the maximum capacity area for the node and profile
+                val = area_raw[n].get(p) # This is the value of the maximum capacity area for the node and profile
+            elif (n, p) in area_raw: # If the maximum capacity area for the node and profile is in the dictionary, then get the value of the maximum capacity area for the node and profile
+                val = area_raw[(n, p)] # This is the value of the maximum capacity area for the node and profile
 
-    has_area_limits = bool(area_index)
+    has_area_limits = bool(area_index) # This is a boolean flag to indicate if there are area limits for the solar PV technology
 
-    existing_init = _resolve_existing_capacity(nodes, solar, params)
+    existing_init = _resolve_existing_capacity(nodes, solar, params) # This is a dictionary of the existing solar capacity for each node and profile
 
-    fin = financials or {}
-    amortization_factor = annualization_factor_debt_equity(**fin)
+    fin = financials or {} # This is a dictionary of the financials for the solar PV technology
+    amortization_factor = annualization_factor_debt_equity(**fin) # This is the amortization factor for the solar PV technology
 
-    return _ResolvedSolarInputs(
-        efficiency_list=efficiency_list,
-        capital_list=capital_list,
-        om_list=om_list,
-        existing_init=existing_init,
+    return _ResolvedSolarInputs( # This is the resolved solar block inputs for the solar PV technology  
+        efficiency_list=efficiency_list, # This is a list of efficiencies for each profile, which is the efficiency of the solar technology at the node and profile at the time step
+        capital_list=capital_list, # This is a list of capital costs for each profile, which is the capital cost of the solar technology at the node and profile at the time step
+        om_list=om_list, # This is a list of O&M costs for each profile, which is the O&M cost of the solar technology at the node and profile at the time step
+        existing_init=existing_init, # This is a dictionary of the existing solar capacity for each node and profile, which is the existing solar capacity of the solar technology at the node and profile at the time step
         has_area_limits=has_area_limits,
-        area_index=area_index,
-        max_capacity_area_by_node_profile=max_capacity_area_by_node_profile,
-        amortization_factor=amortization_factor,
+        area_index=area_index, # This is a list of (node, profile) pairs with area limits
+        max_capacity_area_by_node_profile=max_capacity_area_by_node_profile, # This is a dictionary of the maximum capacity area for each node and profile, which is the maximum capacity area of the solar technology at the node and profile at the time step
+        amortization_factor=amortization_factor, # This is the amortization factor for the solar PV technology, which is the amortization factor for the solar PV technology       
     )

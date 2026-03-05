@@ -14,4 +14,5 @@ def default_igiugig_case(project_root: Path) -> CaseConfig:
             csv_path=data_dir / "Igiugig_Electric_Loads.csv"
         ),
         solar_path=discover_solar_file(data_dir),
+        technology_parameters={"solar_pv": {}},
     )

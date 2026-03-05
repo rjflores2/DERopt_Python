@@ -32,24 +32,8 @@ def capital_recovery_factor(discount_rate: float, lifetime_years: float) -> floa
     return (r * (1.0 + r) ** n) / (((1.0 + r) ** n) - 1.0)
 
 
-def annualized_capex(capex_total: float, discount_rate: float, lifetime_years: float) -> float:
-    """Convert one-time capex to equivalent annualized cost (single rate).
-
-    Args:
-        capex_total: Total up-front capital in dollars.
-        discount_rate: Real discount rate (e.g. 0.07 for 7%).
-        lifetime_years: Asset lifetime in years.
-
-    Returns:
-        Annualized cost in dollars/year.
-    """
-    if capex_total < 0:
-        raise ValueError("capex_total must be >= 0")
-    return capex_total * capital_recovery_factor(discount_rate, lifetime_years)
-
-
 def annualization_factor_debt_equity(
-    debt_fraction: float = 0.5,
+    debt_fraction: float = 0.8,
     debt_years: float = 10.0,
     debt_rate: float = 0.08,
     equity_years: float = 5.0,
