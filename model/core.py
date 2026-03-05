@@ -110,4 +110,31 @@ def build_model(
 
     model.electricity_balance = pyo.Constraint(model.NODES, model.T, rule=_balance_rule)
 
+    # -------------------------------------------------------------------------
+    # Objective: minimize total cost (sum of objective_contribution from all
+    # technology blocks and utility blocks that define it).
+    # -------------------------------------------------------------------------
+    def _objective_rule(m):
+        total = 0.0
+        for blk in m.component_objects(pyo.Block, descend_into=False):
+            if hasattr(blk, "objective_contribution"):
+                total += blk.objective_contribution
+        return total
+
+    model.obj = pyo.Objective(rule=_objective_rule, sense=pyo.minimize)
+
+    # -------------------------------------------------------------------------
+    # Reporting: total annual cost from existing assets (sunk / fixed).
+    # Blocks may define cost_existing_annual (e.g. O&M on existing, remaining
+    # debt on existing); summed here for post-processing and cost breakdown.
+    # -------------------------------------------------------------------------
+    def _cost_existing_rule(m):
+        total = 0.0
+        for blk in m.component_objects(pyo.Block, descend_into=False):
+            if hasattr(blk, "cost_existing_annual"):
+                total += blk.cost_existing_annual
+        return total
+
+    model.total_cost_existing_annual = pyo.Expression(rule=_cost_existing_rule)
+
     return model

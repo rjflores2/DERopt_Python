@@ -168,14 +168,24 @@ def add_solar_pv_block(
                     b.AREA_LIMIT_INDEX, rule=capacity_area_cap_rule
                 )
 
-            b.objective_contribution = sum( # Adding the objective contribution to the pyomo model, which is the capital cost of the solar capacity adopted and the O&M cost of the solar capacity adopted
+            # Objective: capital (annualized) on adopted + O&M on total capacity (existing + adopted).
+            # O&M on existing is included so the objective equals total annual cost for reporting.
+            b.objective_contribution = sum(
                 b.capital_cost_per_kw[p] * b.solar_capacity_adopted[n, p] * r.amortization_factor
-                + b.om_per_kw_year[p] * b.solar_capacity_adopted[n, p]
+                + b.om_per_kw_year[p] * (b.existing_solar_capacity[n, p] + b.solar_capacity_adopted[n, p])
                 for n in _nodes for p in b.SOLAR
+            )
+            # For post-processing: annual cost from existing assets (sunk; does not affect optimum).
+            # Include O&M on existing; add remaining debt/capital recovery on existing when we have that data.
+            b.cost_existing_annual = pyo.Expression(
+                expr=sum(
+                    b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
+                    for n in _nodes for p in b.SOLAR
+                )
             )
         else:
             # Existing-only: no adoption variable; generation and costs from existing capacity only.
-            def generation_limits_rule_existing_only(m, node, profile, t): # Constraint on the solar generation, which is the production of the solar technology at the node and profile at the time step
+            def generation_limits_rule_existing_only(m, node, profile, t):
                 return m.solar_generation[node, profile, t] <= (
                     m.existing_solar_capacity[node, profile] * m.solar_potential[profile, t]
                 )
@@ -186,6 +196,13 @@ def add_solar_pv_block(
             b.objective_contribution = sum(
                 b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
                 for n in _nodes for p in b.SOLAR
+            )
+            # Same reporting: cost from existing assets; here it's O&M only (add debt when we have it).
+            b.cost_existing_annual = pyo.Expression(
+                expr=sum(
+                    b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
+                    for n in _nodes for p in b.SOLAR
+                )
             )
 
         b.electricity_source_term = pyo.Expression(
@@ -336,15 +353,18 @@ def _resolve_solar_block_inputs( #Merges default parameters with user inputs and
     area_raw = params.get("max_capacity_area_by_node_and_profile") or {} # This is a dictionary of the maximum capacity area for each node and profile
     area_index: list[tuple[str, str]] = [] # This is a list of (node, profile) pairs with area limits      
     max_capacity_area_by_node_profile: dict[tuple[str, str], float] = {} # This is a dictionary of the maximum capacity area for each node and profile
-    for n in nodes: # Looping through the nodes for the solar PV technology
-        for p in solar: # Looping through the solar technologies for the solar PV technology
-            val = None # This is the value of the maximum capacity area for the node and profile
-            if isinstance(area_raw.get(n), dict): # If the maximum capacity area for the node is a dictionary, then get the value of the maximum capacity area for the node and profile
-                val = area_raw[n].get(p) # This is the value of the maximum capacity area for the node and profile
-            elif (n, p) in area_raw: # If the maximum capacity area for the node and profile is in the dictionary, then get the value of the maximum capacity area for the node and profile
-                val = area_raw[(n, p)] # This is the value of the maximum capacity area for the node and profile
+    for n in nodes:
+        for p in solar:
+            val = None
+            if isinstance(area_raw.get(n), dict):
+                val = area_raw[n].get(p)
+            elif (n, p) in area_raw:
+                val = area_raw[(n, p)]
+            if val is not None:
+                area_index.append((n, p))
+                max_capacity_area_by_node_profile[(n, p)] = float(val)
 
-    has_area_limits = bool(area_index) # This is a boolean flag to indicate if there are area limits for the solar PV technology
+    has_area_limits = bool(area_index)
 
     existing_init = _resolve_existing_capacity(nodes, solar, params) # This is a dictionary of the existing solar capacity for each node and profile
 
