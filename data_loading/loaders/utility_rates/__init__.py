@@ -31,6 +31,12 @@ def _register_loaders() -> None:
             importlib.import_module(f".{modname}", pkg)
 
 
+from data_loading.loaders.utility_rates.raw_timeseries import (
+    RawEnergyPriceSeries,
+    load_raw_energy_prices,
+)
+
+
 _register_loaders()
 
 
@@ -54,6 +60,30 @@ def import_prices_for_timestamps(rate: ParsedRate, timestamps: list[datetime]) -
     )
 
 
+def get_import_prices_for_timestamps(
+    source: ParsedRate | RawEnergyPriceSeries,
+    timestamps: list[datetime],
+) -> list[float]:
+    """Return the single import price ($/kWh) vector for the model utility block.
+
+    Unified interface: accepts either an OpenEI ParsedRate (TOU) or a RawEnergyPriceSeries.
+    Returns one list aligned to timestamps (length = len(timestamps)) for use in the cost function.
+    """
+    if isinstance(source, RawEnergyPriceSeries):
+        prices = source.prices
+        n = len(timestamps)
+        if len(prices) == n:
+            return list(prices)
+        if len(prices) > n:
+            return list(prices[:n])
+        raise ValueError(
+            f"Raw energy price series has {len(prices)} values but run has {n} periods. "
+            "Align the file length to the run time steps or use a longer series."
+        )
+    # ParsedRate (OpenEI TOU)
+    return import_prices_for_timestamps(source, timestamps)
+
+
 __all__ = [
     "BlockDirection",
     "RateType",
@@ -62,4 +92,7 @@ __all__ = [
     "register_utility",
     "get_loader",
     "import_prices_for_timestamps",
+    "get_import_prices_for_timestamps",
+    "RawEnergyPriceSeries",
+    "load_raw_energy_prices",
 ]

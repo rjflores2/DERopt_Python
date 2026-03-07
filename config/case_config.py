@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from data_loading.time_subset import TimeSubsetConfig
+
 
 @dataclass(slots=True)
 class FinancialsConfig:
@@ -71,6 +73,13 @@ class CaseConfig:
     utility_rate_path: Path | None = None
     # When the JSON has multiple "items", which one to use (0-based). None = first.
     utility_rate_item_index: int | None = None
+    # Optional raw 8760/N energy price file (CSV). Use for wholesale, real-time, etc.
+    # If set, this is used for the import price vector; utility_rate_path can still be set for demand/metadata.
+    energy_price_path: Path | None = None
+    # CSV column name for price ($/kWh). If None, first numeric column or only column is used.
+    energy_price_column: str | None = None
+    # Optional reduced-horizon run mode for faster development iterations.
+    time_subset: TimeSubsetConfig | None = None
 
 
 def discover_load_file(folder: Path) -> Path:
@@ -151,3 +160,4 @@ def get_case_config(project_root: Path, case_name: str = "igiugig") -> CaseConfi
     raise ValueError(
         f"Unknown case '{case_name}'. Valid cases: {', '.join(available)}"
     )
+

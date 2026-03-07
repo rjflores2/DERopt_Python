@@ -6,11 +6,19 @@ from typing import Any
 
 @dataclass(slots=True)
 class DataContainer:
-    """Unified model input container used by core and module blocks."""
+    """Unified model input container: loads, renewables (solar), and utility data.
+
+    indices/timeseries/static: load and resource series (solar, etc.) and time index.
+    import_prices: resolved $/kWh per period (from OpenEI or raw 8760/N), aligned to container time.
+    utility_rate: optional ParsedRate for demand/metadata when grid block exists.
+    """
 
     indices: dict[str, Any] = field(default_factory=dict)
     timeseries: dict[str, Any] = field(default_factory=dict)
     static: dict[str, Any] = field(default_factory=dict)
+    # Utility: single import price vector and optional rate metadata (demand, etc.)
+    import_prices: list[float] | None = None
+    utility_rate: Any = None
 
     def validate_minimum_fields(self) -> None:
         """Validate minimum fields required by early slices."""

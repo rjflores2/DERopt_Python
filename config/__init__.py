@@ -4,6 +4,7 @@ from config.case_config import (
     CaseConfig,
     EnergyLoadFileConfig,
     FinancialsConfig,
+    TimeSubsetConfig,
     discover_load_file,
     discover_solar_file,
     get_case_config,
@@ -14,9 +15,9 @@ __all__ = [
     "CaseConfig",
     "EnergyLoadFileConfig",
     "FinancialsConfig",
+    "TimeSubsetConfig",
     "default_igiugig_case",
     "discover_load_file",
     "discover_solar_file",
     "get_case_config",
 ]
-

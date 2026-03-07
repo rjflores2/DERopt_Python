@@ -77,8 +77,11 @@ def _parse_time_column(series: pd.Series, file_path: Path) -> pd.DatetimeIndex:
             return pd.DatetimeIndex(dts)
     except (ValueError, TypeError, IndexError):
         pass
-    # Text / ISO
-    return pd.to_datetime(series, errors="coerce")
+    # Text / ISO: use format="mixed" to avoid "Could not infer format" warning (pandas 2.0+)
+    try:
+        return pd.to_datetime(series, format="mixed", errors="coerce")
+    except (TypeError, ValueError):
+        return pd.to_datetime(series, errors="coerce")
 
 
 def _time_of_year_minutes(dt: datetime) -> float:

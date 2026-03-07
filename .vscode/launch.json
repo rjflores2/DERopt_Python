@@ -15,7 +15,7 @@
             "justMyCode": true,
 
             "env": {
-                "DEROPT_CASE": "igiugig_multi_node",
+                "DEROPT_CASE": "igiugig_xlsx",
                 "PYTHONPATH": "${workspaceFolder}"
             }
         }

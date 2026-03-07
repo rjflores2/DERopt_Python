@@ -10,6 +10,8 @@ def default_igiugig_case(project_root: Path) -> CaseConfig:
     data_dir = project_root / "data" / "Igiugig"
     rate_path = data_dir / "SCE_D_TOU.json"
     if not rate_path.is_file():
+        rate_path = project_root / "data" / "Igiugig_xlsx" / "SCE_D_TOU.json"
+    if not rate_path.is_file():
         rate_path = None
     return CaseConfig(
         case_name="Igiugig",

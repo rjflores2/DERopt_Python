@@ -20,7 +20,6 @@ def build_model(
     *,
     technology_parameters: dict[str, Any] | None = None,
     financials: dict[str, Any] | None = None,
-    utility_rate: Any = None,
 ) -> pyo.ConcreteModel | None:
     """Build a Pyomo model with time set T and attach technology blocks when data supports them.
 
@@ -29,9 +28,8 @@ def build_model(
     Example: technology_parameters = {"solar_pv": {}, "diesel_generation": {...}}
     gives solar (defaults) and diesel (with params); all other techs are off.
 
-    utility_rate: Optional ParsedRate from load_openei_rate (case config utility_rate_path).
-        Not used yet; when a grid/utility block is added, it will consume this for
-        import energy cost and demand charges.
+    Utility data (import_prices, utility_rate) is read from data; load and solar are already
+    in the same DataContainer.
 
     Returns:
         ConcreteModel with model.T (time set), model.NODES (one per load), and optionally
@@ -57,7 +55,17 @@ def build_model(
         raise ValueError("model requires data.static['electricity_load_keys'] (load data first)")
     model.NODES = pyo.Set(initialize=list(load_keys), ordered=True)
 
-    # Attach utility rate when provided (from case config); grid/utility block will use it when added.
+    n_time = len(data.indices["time"])
+    import_prices = getattr(data, "import_prices", None)
+    utility_rate = getattr(data, "utility_rate", None)
+    if import_prices is not None and len(import_prices) != n_time:
+        raise ValueError(
+            f"data.import_prices length {len(import_prices)} does not match time steps {n_time}. "
+            "Align the energy price source to the run timestamps."
+        )
+    # Single import price vector for utility block cost function (from OpenEI or raw 8760/N).
+    model.import_prices = import_prices
+    # Optional ParsedRate for demand charges and metadata when grid block exists.
     model.utility_rate = utility_rate
 
     # -------------------------------------------------------------------------

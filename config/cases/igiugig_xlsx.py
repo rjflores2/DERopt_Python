@@ -7,12 +7,10 @@ from config.case_config import CaseConfig, EnergyLoadFileConfig, discover_load_f
 
 def default_igiugig_xlsx_case(project_root: Path) -> CaseConfig:
     """Return case config for Igiugig xlsx load data (auto-discovers load file)."""
-    folder = project_root / "data" / "Igiugig_xlsx"
+    folder = (project_root / "data" / "Igiugig_xlsx").resolve()
     load_path = discover_load_file(folder)
-    # Optional: point to an OpenEI rate JSON in this folder (e.g. SCE_D_TOU.json, SCE_D_Tiered.json).
+    # SCE GS3 TOU rate JSON - playground will raise FileNotFoundError if file missing
     rate_path = folder / "SCE_GS3_TOU.json"
-    if not rate_path.is_file():
-        rate_path = None
     return CaseConfig(
         case_name="Igiugig xlsx",
         energy_load=EnergyLoadFileConfig(csv_path=load_path),
