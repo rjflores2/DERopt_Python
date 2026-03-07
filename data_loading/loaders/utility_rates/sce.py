@@ -23,6 +23,8 @@ Demand charge implementation (for optimization model when grid block exists):
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from data_loading.loaders.utility_rates import ParsedRate, RateType, register_utility
 
 #Tiers have two meanings - inside OpenEI, a tier can refer to a time (i.e., tier 1 is for summeer on-peak, tier 2 is summer mid or off)
@@ -122,6 +124,27 @@ def _tou_prices_for_schedule(
     return prices
 
 
+def tou_import_prices_for_timestamps(
+    import_prices_12x24_weekday: list[float],
+    import_prices_12x24_weekend: list[float],
+    timestamps: list[datetime],
+) -> list[float]:
+    """Return import price ($/kWh) for each timestamp using TOU 12×24 weekday/weekend grids.
+
+    Grids are flat 288 (month 0–11 × hour 0–23): index = month * 24 + hour.
+    Use the timestamps from building data so weekday/weekend and month match the simulation.
+    """
+    out: list[float] = []
+    for dt in timestamps:
+        month = dt.month - 1  # 0–11
+        hour_of_day = dt.hour
+        is_weekend = dt.weekday() >= 5  # 5=Sat, 6=Sun
+        grid = import_prices_12x24_weekend if is_weekend else import_prices_12x24_weekday
+        idx = month * 24 + hour_of_day
+        out.append(float(grid[idx]) if idx < len(grid) else 0.0)
+    return out
+
+
 @register_utility("Southern California Edison Co")
 def load_sce_rate(item: dict) -> ParsedRate:
     """Parse an SCE OpenEI rate item. Detects TOU vs monthly tiered from structure."""
@@ -168,8 +191,9 @@ def load_sce_rate(item: dict) -> ParsedRate:
         )
     else:
         # TOU: one rate per tier; weekday and weekend schedules can differ.
-        prices_weekday = _tou_prices_for_schedule(schedule_weekday, energy)
-        prices_weekend = _tou_prices_for_schedule(schedule_weekend, energy)
+        # Import prices 8760 (or N) are built from building-data timestamps via tou_import_prices_for_timestamps().
+        import_prices_12x24_weekday = _tou_prices_for_schedule(schedule_weekday, energy)
+        import_prices_12x24_weekend = _tou_prices_for_schedule(schedule_weekend, energy)
         return ParsedRate(
             rate_type="tou",
             utility=utility,
@@ -179,10 +203,9 @@ def load_sce_rate(item: dict) -> ParsedRate:
                 "schedule_weekday": schedule_weekday,
                 "schedule_weekend": schedule_weekend,
                 "energyratestructure": energy,
-                "prices_12x24": prices_weekday,
-                "prices_12x24_weekday": prices_weekday,
-                "prices_12x24_weekend": prices_weekend,
-                "prices_8760": None,
+                "import_prices_12x24": import_prices_12x24_weekday,
+                "import_prices_12x24_weekday": import_prices_12x24_weekday,
+                "import_prices_12x24_weekend": import_prices_12x24_weekend,
             },
             demand=_extract_demand(item),
         )

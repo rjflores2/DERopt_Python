@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+from datetime import datetime
 
 from data_loading.loaders.utility_rates.openei_router import (
     BlockDirection,
@@ -32,6 +33,27 @@ def _register_loaders() -> None:
 
 _register_loaders()
 
+
+def import_prices_for_timestamps(rate: ParsedRate, timestamps: list[datetime]) -> list[float]:
+    """Return import price ($/kWh) per timestamp using the rate and building-data timestamps.
+
+    Use the timestamps from your building/load data so weekday/weekend and month match.
+    Only TOU rates are supported; tiered/flat would need different logic.
+    """
+    if rate.rate_type != "tou":
+        raise ValueError(
+            f"import_prices_for_timestamps only supports rate_type='tou'; got {rate.rate_type!r}. "
+            "Tiered and flat rates need different handling."
+        )
+    from data_loading.loaders.utility_rates.sce import tou_import_prices_for_timestamps
+
+    return tou_import_prices_for_timestamps(
+        rate.payload["import_prices_12x24_weekday"],
+        rate.payload["import_prices_12x24_weekend"],
+        timestamps,
+    )
+
+
 __all__ = [
     "BlockDirection",
     "RateType",
@@ -39,4 +61,5 @@ __all__ = [
     "load_openei_rate",
     "register_utility",
     "get_loader",
+    "import_prices_for_timestamps",
 ]

@@ -13,7 +13,7 @@ def main() -> int:
     """Run a first end-to-end data loading path for the default case."""
     project_root = Path(__file__).resolve().parents[1]
     ### Case name specifies which case to run, this should match a folder in the config/cases directory
-    case_name = os.getenv("DEROPT_CASE", "igiugig_multi_node")
+    case_name = os.getenv("DEROPT_CASE", "Igiugig_xlsx)
     case_cfg = get_case_config(project_root, case_name)
 
 # Loads the energy load from the case config (validates required fields internally).

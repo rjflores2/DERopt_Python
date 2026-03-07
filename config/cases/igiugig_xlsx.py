@@ -10,7 +10,7 @@ def default_igiugig_xlsx_case(project_root: Path) -> CaseConfig:
     folder = project_root / "data" / "Igiugig_xlsx"
     load_path = discover_load_file(folder)
     # Optional: point to an OpenEI rate JSON in this folder (e.g. SCE_D_TOU.json, SCE_D_Tiered.json).
-    rate_path = folder / "SCE_D_TOU.json"
+    rate_path = folder / "SCE_GS3_TOU.json"
     if not rate_path.is_file():
         rate_path = None
     return CaseConfig(
