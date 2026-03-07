@@ -67,6 +67,10 @@ class CaseConfig:
     technology_parameters: dict[str, dict[str, Any]] | None = None
     # Financing assumptions for capital amortization (debt/equity). User-editable.
     financials: FinancialsConfig | None = None  # None = use FinancialsConfig() defaults
+    # Optional utility rate (OpenEI-style JSON). When set, load via load_openei_rate for grid cost, etc.
+    utility_rate_path: Path | None = None
+    # When the JSON has multiple "items", which one to use (0-based). None = first.
+    utility_rate_item_index: int | None = None
 
 
 def discover_load_file(folder: Path) -> Path:

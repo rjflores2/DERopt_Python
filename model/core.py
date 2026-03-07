@@ -20,6 +20,7 @@ def build_model(
     *,
     technology_parameters: dict[str, Any] | None = None,
     financials: dict[str, Any] | None = None,
+    utility_rate: Any = None,
 ) -> pyo.ConcreteModel | None:
     """Build a Pyomo model with time set T and attach technology blocks when data supports them.
 
@@ -28,6 +29,10 @@ def build_model(
     Example: technology_parameters = {"solar_pv": {}, "diesel_generation": {...}}
     gives solar (defaults) and diesel (with params); all other techs are off.
 
+    utility_rate: Optional ParsedRate from load_openei_rate (case config utility_rate_path).
+        Not used yet; when a grid/utility block is added, it will consume this for
+        import energy cost and demand charges.
+
     Returns:
         ConcreteModel with model.T (time set), model.NODES (one per load), and optionally
         model.solar_pv (Block). Returns None if data is None (backward compatibility).
@@ -35,6 +40,9 @@ def build_model(
     # No data: return None so callers can handle "no model" without error.
     if data is None:
         return None
+
+    # Fail fast if required data fields are missing (don't propagate bad data downstream).
+    data.validate_minimum_fields()
 
     # -------------------------------------------------------------------------
     # Base model and index sets
@@ -48,6 +56,9 @@ def build_model(
     if not load_keys:
         raise ValueError("model requires data.static['electricity_load_keys'] (load data first)")
     model.NODES = pyo.Set(initialize=list(load_keys), ordered=True)
+
+    # Attach utility rate when provided (from case config); grid/utility block will use it when added.
+    model.utility_rate = utility_rate
 
     # -------------------------------------------------------------------------
     # Technology blocks (opt-in via technology_parameters)

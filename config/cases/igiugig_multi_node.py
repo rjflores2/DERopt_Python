@@ -8,12 +8,16 @@ from config.case_config import CaseConfig, EnergyLoadFileConfig, discover_solar_
 def default_igiugig_multi_node_case(project_root: Path) -> CaseConfig:
     """Return local case config for Igiugig multi-node load data."""
     data_dir = project_root / "data" / "Igiugig_Multi_Node"
+    rate_path = data_dir / "SCE_D_TOU.json"
+    if not rate_path.is_file():
+        rate_path = None
     return CaseConfig(
         case_name="Igiugig Multi Node",
         energy_load=EnergyLoadFileConfig(
             csv_path=data_dir / "Igiugig_Electric_Loads.csv"
         ),
         solar_path=discover_solar_file(data_dir),
+        utility_rate_path=rate_path,
         # Example: override solar PV parameters (order of params_by_profile = order of solar columns in data).
         technology_parameters={
             "solar_pv": {

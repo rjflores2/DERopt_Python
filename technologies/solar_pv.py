@@ -293,7 +293,33 @@ def _params_per_profile(solar_keys: list, global_params: dict) -> tuple[list, li
         capital_list.append(float(p["capital_cost_per_kw"])) # This is a list of capital costs for each profile, which is the capital cost of the solar technology at the node and profile at the time step
         om_list.append(float(p["om_per_kw_year"])) # This is a list of O&M costs for each profile, which is the O&M cost of the solar technology at the node and profile at the time step
 
-    return efficiency_list, capital_list, om_list # Return the list of efficiencies, capital costs, and O&M costs for each profile
+    return efficiency_list, capital_list, om_list
+
+
+def _validate_solar_params(
+    solar_keys: list[str],
+    efficiency_list: list[float],
+    capital_list: list[float],
+    om_list: list[float],
+) -> None:
+    """Raise ValueError if any solar_pv parameter is invalid (e.g. efficiency 0 or negative)."""
+    for i, (eff, cap, om) in enumerate(zip(efficiency_list, capital_list, om_list)):
+        profile_label = solar_keys[i] if i < len(solar_keys) else f"profile index {i}"
+        if eff <= 0 or eff > 1:
+            raise ValueError(
+                f"solar_pv: efficiency for {profile_label!r} must be in (0, 1], got {eff}. "
+                "Check technology_parameters['solar_pv'] and params_by_profile."
+            )
+        if cap < 0:
+            raise ValueError(
+                f"solar_pv: capital_cost_per_kw for {profile_label!r} must be >= 0, got {cap}. "
+                "Check technology_parameters['solar_pv'] and params_by_profile."
+            )
+        if om < 0:
+            raise ValueError(
+                f"solar_pv: om_per_kw_year for {profile_label!r} must be >= 0, got {om}. "
+                "Check technology_parameters['solar_pv'] and params_by_profile."
+            )
 
 
 def _resolve_existing_capacity(
@@ -315,6 +341,11 @@ def _resolve_existing_capacity(
                 val = float(by_node_profile[n].get(p, 0.0))
             elif (n, p) in by_node_profile:
                 val = float(by_node_profile[(n, p)])
+            if val < 0:
+                raise ValueError(
+                    f"solar_pv: existing_solar_capacity for (node={n!r}, profile={p!r}) must be >= 0, got {val}. "
+                    "Check existing_solar_capacity_by_node_and_profile in technology_parameters['solar_pv']."
+                )
             out[(n, p)] = val
     return out
 
@@ -347,7 +378,8 @@ def _resolve_solar_block_inputs( #Merges default parameters with user inputs and
     for k, v in DEFAULT_SOLAR_PV_PARAMS.items(): # This is a dictionary of the default solar PV parameters for the solar PV technology
         params.setdefault(k, v)
 
-    efficiency_list, capital_list, om_list = _params_per_profile(solar, params) # This is a list of efficiencies, capital costs, and O&M costs for each profile
+    efficiency_list, capital_list, om_list = _params_per_profile(solar, params)
+    _validate_solar_params(solar, efficiency_list, capital_list, om_list)
 
     # Per-node, per-profile area limits: {(node, profile): area} or {node: {profile: area}}.
     area_raw = params.get("max_capacity_area_by_node_and_profile") or {} # This is a dictionary of the maximum capacity area for each node and profile
@@ -361,8 +393,14 @@ def _resolve_solar_block_inputs( #Merges default parameters with user inputs and
             elif (n, p) in area_raw:
                 val = area_raw[(n, p)]
             if val is not None:
+                area_val = float(val)
+                if area_val <= 0:
+                    raise ValueError(
+                        f"solar_pv: max_capacity_area for (node={n!r}, profile={p!r}) must be > 0, got {val}. "
+                        "Check max_capacity_area_by_node_and_profile in technology_parameters['solar_pv']."
+                    )
                 area_index.append((n, p))
-                max_capacity_area_by_node_profile[(n, p)] = float(val)
+                max_capacity_area_by_node_profile[(n, p)] = area_val
 
     has_area_limits = bool(area_index)
 

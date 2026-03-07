@@ -6,7 +6,7 @@ This requirements spec captures the agreed implementation baseline for the DERop
 
 The full detailed plan is maintained in:
 
-- `docs/deropt_python_pyomo_rebuild.md`
+- `docs/PLAN.md`
 
 This spec file exists to satisfy Slice 0 handoff requirements and to provide a stable requirements anchor for collaborators.
 
@@ -36,6 +36,6 @@ This spec file exists to satisfy Slice 0 handoff requirements and to provide a s
 
 ## Working Agreement
 
-- This file and `docs/deropt_python_pyomo_rebuild.md` should be updated together when scope/architecture decisions change.
+- This file and `docs/PLAN.md` should be updated together when scope/architecture decisions change.
 - Slice execution should follow the ordered implementation table in the canonical plan.
 

@@ -20,8 +20,8 @@ def _discover_case_builders() -> dict[str, object]:
                     obj = getattr(mod, name)
                     if callable(obj):
                         builders[name] = obj
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"Failed to import case module '{modname}'") from exc
     return builders
 
 

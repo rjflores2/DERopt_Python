@@ -111,6 +111,17 @@ You can override only some fields per profile; the rest come from the top-level 
 
 No edits to `config/cases/__init__.py` or the playground are required; cases are auto-discovered.
 
+## Conventions: fail hard
+
+The codebase is written to **fail fast with clear errors** instead of allowing silent failures that surface later or downstream.
+
+- **Config vs. missing files:** If case config sets a path (e.g. `solar_path`, `utility_rate_path`) and that path does not exist, the run **raises** (e.g. `FileNotFoundError`) with a message that includes the path. We do not silently skip or set a value to `None` when the user has asked for that file.
+- **Data validation:** Loaders and the model validate required fields (e.g. `electricity_load_keys`, `time`, `time_serial`) and **raise** with a clear message if something is missing. The model calls `data.validate_minimum_fields()` at entry so invalid data never propagates into the build.
+- **Loader and API contracts:** When a function is required to return a specific type (e.g. `ParsedRate` from a utility loader), we check the return value and **raise** with a descriptive error if it is `None` or the wrong type, rather than passing it downstream.
+- **Defensive checks:** For example, if `build_model` is called with data and returns `None`, the playground raises instead of continuing; technology parameter validation (e.g. solar efficiency in (0, 1]) raises so bad config is caught at build time.
+
+When adding or changing code, prefer **explicit validation and early raises** over defaulting or continuing with invalid or missing data.
+
 ## Project structure
 
 | Path | Role |
@@ -141,7 +152,5 @@ No edits to `config/cases/__init__.py` or the playground are required; cases are
 
 ## More information
 
-- **Implementation plan**: `docs/deropt_python_pyomo_rebuild.md`
-- **Concrete slice steps**: `docs/implementation_slices_detailed.md`
+- **Implementation plan and roadmap**: `docs/PLAN.md`
 - **Requirements spec**: `requirements/deropt_rebuild_spec.md`
-- **Extending the model**: `docs/extending_the_model.md`
