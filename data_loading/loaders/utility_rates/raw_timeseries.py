@@ -38,19 +38,9 @@ def load_raw_energy_prices(
 ) -> RawEnergyPriceSeries:
     """Load a raw 8760 (or N-length) energy price series from CSV.
 
-    Supports:
-    - CSV with headers: set price_column to the column name with $/kWh (or first numeric column if None).
-    - CSV without headers: single column of numeric prices (e.g. 8760 rows).
-    - datetime_column is ignored for now; alignment to run timestamps is by index in get_import_prices_for_timestamps.
-
-    Args:
-        path: Path to the CSV file.
-        price_column: Name of column containing $/kWh. If None, first numeric column (or only column) is used.
-        datetime_column: Reserved for future alignment by time; currently unused.
-        source_label: Label for the source (e.g. 'wholesale', 'rtp').
-
-    Returns:
-        RawEnergyPriceSeries with prices list and source_label.
+    CSV with headers: use price_column for $/kWh column, or None to use first numeric column.
+    CSV without headers: single column of numeric prices (e.g. 8760 rows).
+    datetime_column is reserved for future time-based alignment; for now alignment is by index in get_import_prices_for_timestamps.
     """
     path = Path(path)
     if not path.is_file():

@@ -37,29 +37,22 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
 
     if case_cfg.solar_path is not None:
         if not case_cfg.solar_path.exists():
-            raise FileNotFoundError(
-                f"Case config solar_path is set but file does not exist: {case_cfg.solar_path}. "
-                "Check the path in your case builder or add the solar file."
-            )
+            raise FileNotFoundError(f"solar_path set but file missing: {case_cfg.solar_path}")
         load_solar_into_container(data, case_cfg.solar_path)
 
+    # One energy price source (raw CSV or OpenEI) so we always produce a single import_prices vector for the model.
     utility_rate = None
     energy_price_source = None
     if case_cfg.energy_price_path is not None:
         if not case_cfg.energy_price_path.exists():
-            raise FileNotFoundError(
-                f"Case config energy_price_path is set but file does not exist: {case_cfg.energy_price_path}."
-            )
+            raise FileNotFoundError(f"energy_price_path set but file missing: {case_cfg.energy_price_path}")
         energy_price_source = load_raw_energy_prices(
             case_cfg.energy_price_path,
             price_column=case_cfg.energy_price_column,
         )
     elif case_cfg.utility_rate_path is not None:
         if not case_cfg.utility_rate_path.exists():
-            raise FileNotFoundError(
-                f"Case config utility_rate_path is set but file does not exist: {case_cfg.utility_rate_path}. "
-                "Check the path in your case builder or add the rate JSON file."
-            )
+            raise FileNotFoundError(f"utility_rate_path set but file missing: {case_cfg.utility_rate_path}")
         utility_rate = load_openei_rate(
             case_cfg.utility_rate_path,
             item_index=case_cfg.utility_rate_item_index,
@@ -71,6 +64,7 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
         data.import_prices = get_import_prices_for_timestamps(energy_price_source, timestamps)
         data.utility_rate = utility_rate
 
+    # Subset last: slice every per-timestep series (timeseries + import_prices) in one place so lengths stay aligned.
     if case_cfg.time_subset is not None:
         data = apply_time_subset(data, case_cfg.time_subset)
 

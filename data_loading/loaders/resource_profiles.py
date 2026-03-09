@@ -121,7 +121,14 @@ def load_solar_into_container(
     if not target_datetimes:
         raise ValueError("DataContainer has no time vector (timeseries['datetime'] empty)")
 
-    df = pd.read_csv(solar_path)
+    # Support CSV and Excel so discover_solar_file (which prefers .xlsx) never returns an unloadable path.
+    suffix = solar_path.suffix.lower()
+    if suffix == ".xlsx":
+        df = pd.read_excel(solar_path, sheet_name=0, header=0, engine="openpyxl")
+    elif suffix == ".xls":
+        df = pd.read_excel(solar_path, sheet_name=0, header=0, engine="xlrd")
+    else:
+        df = pd.read_csv(solar_path)
     df = df.dropna(how="all", axis=0).dropna(how="all", axis=1)
     if df.empty:
         raise ValueError(f"No data rows in {solar_path}")

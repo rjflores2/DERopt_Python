@@ -47,10 +47,7 @@ def import_prices_for_timestamps(rate: ParsedRate, timestamps: list[datetime]) -
     Only TOU rates are supported; tiered/flat would need different logic.
     """
     if rate.rate_type != "tou":
-        raise ValueError(
-            f"import_prices_for_timestamps only supports rate_type='tou'; got {rate.rate_type!r}. "
-            "Tiered and flat rates need different handling."
-        )
+        raise ValueError(f"import_prices_for_timestamps only supports rate_type='tou'; got {rate.rate_type!r}")
     from data_loading.loaders.utility_rates.sce import tou_import_prices_for_timestamps
 
     return tou_import_prices_for_timestamps(
@@ -76,10 +73,7 @@ def get_import_prices_for_timestamps(
             return list(prices)
         if len(prices) > n:
             return list(prices[:n])
-        raise ValueError(
-            f"Raw energy price series has {len(prices)} values but run has {n} periods. "
-            "Align the file length to the run time steps or use a longer series."
-        )
+        raise ValueError(f"Raw price series has {len(prices)} values but run has {n} periods; align length or use longer series")
     # ParsedRate (OpenEI TOU)
     return import_prices_for_timestamps(source, timestamps)
 

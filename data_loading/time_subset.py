@@ -74,6 +74,7 @@ def apply_time_subset(data: DataContainer, cfg: TimeSubsetConfig) -> DataContain
         if isinstance(values, list) and len(values) == original_len:
             data.timeseries[key] = [values[i] for i in keep_idx]
 
+    # Slice import_prices too; getattr avoids AttributeError if container doesn't have the attribute (e.g. in tests).
     if getattr(data, "import_prices", None) is not None and len(data.import_prices) == original_len:
         data.import_prices = [data.import_prices[i] for i in keep_idx]
 

@@ -23,17 +23,9 @@ def build_model(
 ) -> pyo.ConcreteModel | None:
     """Build a Pyomo model with time set T and attach technology blocks when data supports them.
 
-    Only technologies listed in technology_parameters (with a non-None value) are included.
-    Omit a key to exclude that technology; use {} for defaults or a dict for overrides.
-    Example: technology_parameters = {"solar_pv": {}, "diesel_generation": {...}}
-    gives solar (defaults) and diesel (with params); all other techs are off.
-
-    Utility data (import_prices, utility_rate) is read from data; load and solar are already
-    in the same DataContainer.
-
-    Returns:
-        ConcreteModel with model.T (time set), model.NODES (one per load), and optionally
-        model.solar_pv (Block). Returns None if data is None (backward compatibility).
+    Technologies: only those in technology_parameters with a non-None value are included; use {} for defaults.
+    Utility data (import_prices, utility_rate) is read from data so the model has a single data contract.
+    Returns None if data is None (backward compatibility).
     """
     # No data: return None so callers can handle "no model" without error.
     if data is None:
@@ -56,13 +48,11 @@ def build_model(
     model.NODES = pyo.Set(initialize=list(load_keys), ordered=True)
 
     n_time = len(data.indices["time"])
+    # getattr: DataContainer may come from older code or tests that don't set these; avoid AttributeError.
     import_prices = getattr(data, "import_prices", None)
     utility_rate = getattr(data, "utility_rate", None)
     if import_prices is not None and len(import_prices) != n_time:
-        raise ValueError(
-            f"data.import_prices length {len(import_prices)} does not match time steps {n_time}. "
-            "Align the energy price source to the run timestamps."
-        )
+        raise ValueError(f"data.import_prices length {len(import_prices)} != time steps {n_time}")
     # Single import price vector for utility block cost function (from OpenEI or raw 8760/N).
     model.import_prices = import_prices
     # Optional ParsedRate for demand charges and metadata when grid block exists.
@@ -85,6 +75,11 @@ def build_model(
             technology_parameters=tech_params,
             financials=fin,
         )
+
+    # Grid/utility block: grid_import variable, energy cost (import_prices), demand charges (from utility_rate.demand).
+    # Attach when we have import_prices or demand data so balance can include grid and objective includes utility cost.
+    from utilities.electricity_import_export import register as register_utility_block
+    register_utility_block(model, data)
 
     # -------------------------------------------------------------------------
     # Electricity balance: sources == sinks (per node, per time)

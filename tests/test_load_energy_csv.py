@@ -68,7 +68,7 @@ def test_load_energy_load_fallback_detects_kwh_column(tmp_path: Path):
     assert data.static["load_units"] == "kWh"
 
 
-def test_load_energy_load_multiple_columns(tmp_path: Path):
+def test_load_energy_load_excludes_thermal_columns_from_auto_selection(tmp_path: Path):
     csv_path = tmp_path / "loads_ambiguous.csv"
     csv_path.write_text(
         "Date,Electric Demand (kW),Thermal Demand (kW)\n"
@@ -83,9 +83,10 @@ def test_load_energy_load_multiple_columns(tmp_path: Path):
     )
     data = load_energy_load(cfg)
 
-    assert data.static["load_columns"] == ["Electric Demand (kW)", "Thermal Demand (kW)"]
+    # Auto-selection should keep electricity and drop thermal-looking columns.
+    assert data.static["load_columns"] == ["Electric Demand (kW)"]
     assert data.timeseries["electricity_load__electric_load_kw"] == [10.0, 11.5]
-    assert data.timeseries["electricity_load__thermal_load_kw"] == [8.0, 8.5]
+    assert "electricity_load__thermal_load_kw" not in data.timeseries
 
 
 def test_load_energy_load_duplicate_headers(tmp_path: Path):

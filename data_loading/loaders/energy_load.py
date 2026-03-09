@@ -151,6 +151,10 @@ _KW_WORD_PATTERN = re.compile(r"\bkw\b", re.IGNORECASE)
 _KWH_WORD_PATTERN = re.compile(r"\bkwh\b", re.IGNORECASE)
 _NON_ALPHANUMERIC_PATTERN = re.compile(r"[^a-z0-9]+")
 
+# Thermal load markers: columns with these in the name (e.g. Heating (kW), Cooling (kWh), DHW (kW))
+# are not treated as electricity load unless explicitly selected via load_column.
+_THERMAL_KEYWORDS = ("heating", "cooling", "thermal", "dhw", "hot_water", "space_heat", "hvac")
+
 
 def _normalize_series_key(header_name: str) -> str:
     """Convert header text to a stable key suffix; use 'load' not 'demand' (kWh = load)."""
@@ -169,24 +173,34 @@ def _deduplicate_headers(fieldnames: list[str]) -> list[str]:
     return deduped
 
 
+def _is_thermal_column(header_name: str) -> bool:
+    """True if the column name looks like thermal (heating, cooling, DHW, etc.), not electricity."""
+    normalized = _NON_ALPHANUMERIC_PATTERN.sub("_", header_name.lower()).strip("_")
+    return any(kw in normalized for kw in _THERMAL_KEYWORDS)
+
+
 def _resolve_load_columns(
     fieldnames: list[str], configured_column: str, csv_path: Path
 ) -> list[str]:
-    """Resolve load columns by explicit config or (kW)/(kWh) in header. Duplicate headers are deduplicated earlier (e.g. 'Electric Demand (kW) [2]'), so all matching columns are included."""
+    """Resolve load columns by explicit config or (kW)/(kWh) in header.
+    Columns that look like thermal (heating, cooling, _thermal, _DHW, etc.) are excluded from
+    auto-selection so they are not mixed into electricity_load_keys; use load_column to include one explicitly if needed.
+    """
     matched_unit_columns = [name for name in fieldnames if _UNIT_IN_PARENTHESES_PATTERN.search(name)]
+    electric_only = [c for c in matched_unit_columns if not _is_thermal_column(c)]
     selected: list[str] = []
 
     if configured_column in fieldnames:
         selected.append(configured_column)
-        selected.extend([c for c in matched_unit_columns if c != configured_column])
+        selected.extend([c for c in electric_only if c != configured_column])
         return selected
 
-    if matched_unit_columns:
-        return matched_unit_columns
+    if electric_only:
+        return electric_only
 
     raise ValueError(
         f"Missing required load column '{configured_column}' in {csv_path}. "
-        f"No '(kW)' or '(kWh)' column was detected. Found columns: {fieldnames}"
+        f"No non-thermal '(kW)' or '(kWh)' column was detected (thermal columns like heating/cooling/DHW are excluded). Found columns: {fieldnames}"
     )
 
 

@@ -157,20 +157,12 @@ def load_openei_rate(
             f"Registered (normalized): {list(_REGISTRY.keys())}"
         )
 
+    # Validate loader return at the boundary so bad data never propagates; fail with a clear contract error.
     result = loader(item)
     if result is None:
-        raise TypeError(
-            f"Loader for utility {utility!r} returned None. "
-            "Utility loaders must return a ParsedRate instance."
-        )
+        raise TypeError(f"Loader for {utility!r} returned None; must return ParsedRate")
     if not isinstance(result, ParsedRate):
-        raise TypeError(
-            f"Loader for utility {utility!r} returned {type(result).__name__}, expected ParsedRate. "
-            "Utility loaders must return a ParsedRate instance."
-        )
+        raise TypeError(f"Loader for {utility!r} returned {type(result).__name__}, expected ParsedRate")
     if not hasattr(result, "rate_type") or not hasattr(result, "utility") or not hasattr(result, "name"):
-        raise ValueError(
-            f"Loader for utility {utility!r} returned a ParsedRate with missing required attributes "
-            "(rate_type, utility, name). Check the loader implementation."
-        )
+        raise ValueError(f"Loader for {utility!r} returned ParsedRate missing rate_type/utility/name")
     return result

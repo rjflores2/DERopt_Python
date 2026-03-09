@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deropt-python"
+version = "0.1.0"
+description = "Energy system optimization model for DER selection and sizing (Pyomo + Gurobi)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyomo",
+    "gurobipy",
+    "pandas",
+    "openpyxl",
+    "xlrd",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

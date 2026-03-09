@@ -9,8 +9,8 @@ def default_igiugig_xlsx_case(project_root: Path) -> CaseConfig:
     """Return case config for Igiugig xlsx load data (auto-discovers load file)."""
     folder = (project_root / "data" / "Igiugig_xlsx").resolve()
     load_path = discover_load_file(folder)
-    # SCE GS3 TOU rate JSON - playground will raise FileNotFoundError if file missing
-    rate_path = folder / "SCE_GS3_TOU.json"
+    # Domestic TOU (no demand charges); use SCE_GS3_TOU.json for demand charges.
+    rate_path = folder / "SCE_D_TOU.json"
     return CaseConfig(
         case_name="Igiugig xlsx",
         energy_load=EnergyLoadFileConfig(csv_path=load_path),

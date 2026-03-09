@@ -1,8 +1,16 @@
 """Primary execution entry point for local case runs."""
 
 import os
+import sys
 from dataclasses import asdict
 from pathlib import Path
+
+# Ensure project root is on path when run as script (e.g. python run/playground.py or IDE Run)
+_project_root = Path(__file__).resolve().parents[1]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+import pyomo.environ as pyo
 
 from config import get_case_config
 from model.core import build_model
@@ -35,12 +43,23 @@ def main() -> int:
         df.to_csv(_csv_path)
         print(f"Debug: wrote {_csv_path}")
 
+    # build_model reads import_prices and utility_rate from data only (single source of truth; no extra args).
     model = build_model(data, technology_parameters=technology_parameters, financials=financials)
     if model is None:
-        raise RuntimeError(
-            "build_model returned None. This should not happen when data is provided; "
-            "check that data has required fields (electricity_load_keys, time, time_serial)."
-        )
+        raise RuntimeError("build_model returned None; check data has electricity_load_keys, time, time_serial")
+
+    # Solve with Gurobi
+    solver = pyo.SolverFactory("gurobi")
+    if solver.available():
+        results = solver.solve(model, tee=bool(os.environ.get("DEROPT_SOLVER_TEE")))
+        status = results.solver.status
+        term = results.solver.termination_condition
+        obj_val = pyo.value(model.obj) if model.obj.is_constructed() else None
+        print(f"Solver: {status} / {term}")
+        if obj_val is not None:
+            print(f"Objective value: {obj_val:.2f}")
+    else:
+        print("Solver: Gurobi not available (install gurobipy); skipping solve")
 
     # Summary
     time_count = len(data.indices["time"])

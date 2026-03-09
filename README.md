@@ -12,7 +12,7 @@ From the project root:
 python -m run.playground
 ```
 
-This loads the default case (`igiugig_multi_node`), loads electricity load data (and solar if present for the case), builds the model, and runs. Output is printed to the console.
+This loads the default case (`Igiugig_xlsx`), loads electricity load data (and solar if present for the case), builds the model, and runs. Output is printed to the console.
 
 ### Choose a different case
 
@@ -38,15 +38,16 @@ Input data lives in the `data/` folder (gitignored). Each case points to a subfo
 ### Electricity load files
 
 - Supported formats: CSV, XLSX, XLS
-- Required columns: datetime column (e.g. `Date`), one or more load columns with `(kW)` or `(kWh)` in the header (e.g. `Electric Demand (kW)`). Multiple columns (e.g. multi-node) are supported; duplicate headers are deduplicated.
+- Required columns: datetime column (e.g. `Date`), one or more load columns with `(kW)` or `(kWh)` in the header (e.g. `Electric Demand (kW)`). Multiple electricity columns (e.g. multi-node) are supported; duplicate headers are deduplicated.
 - All load data is stored in **kWh** in the model (kW from file is converted using the time step). Series keys: `electricity_load__{suffix}`; list in `data.static["electricity_load_keys"]`.
 - Datetime formats: strftime strings, `excel_serial`, `matlab_serial`, or `auto` (auto-detect from numeric values)
 - For a data folder, the loader auto-discovers files with `"loads"` in the filename (e.g. `Electric_Loads.xlsx`)
 - **Time conditioning** (optional): Set `target_interval_minutes=60` or `15` in `EnergyLoadFileConfig` to regularize timestamps when irregular; otherwise only NaN/negative filling is applied. Use `target_interval_minutes=None` (default) to keep native resolution.
+- Thermal-looking columns such as `Heating (kW)`, `Cooling (kWh)`, `Thermal Load (kW)`, or `DHW (kW)` are excluded from automatic electricity-load selection so they are not mixed into `electricity_load_keys`.
 
 ### Solar resource files (optional)
 
-- When a case has `solar_path` set, the loader reads a solar CSV and aligns it to the load time vector by time-of-year.
+- When a case has `solar_path` set, the loader reads a solar file (CSV or Excel .xlsx/.xls) and aligns it to the load time vector by time-of-year. Discovery prefers .xlsx over .csv over .xls; the loader supports all three so the discovered path is always loadable.
 - Output is **kWh per kW capacity** (kWh/kW): capacity factor from file × time step. Keys: `solar_production__{suffix}`; list in `data.static["solar_production_keys"]`; units in `data.static["solar_production_units"]` = `"kWh/kW"`.
 
 #### Standard solar profile labels
@@ -149,6 +150,11 @@ When adding or changing code, prefer **explicit validation and early raises** ov
 - **pyyaml** - YAML config loading
 - **pymysql**, **pyodbc** - Database connections (if needed)
 - **pyro4** - Remote/distributed (if needed)
+
+## For developers
+
+- **Where to add cases, loaders, resources; how to run tests:** `docs/DEVELOPMENT.md`
+- **Install in editable mode:** `pip install -e ".[dev]"` then `pytest`
 
 ## More information
 
