@@ -5,17 +5,14 @@ Known semantics:
 - Monthly tiered: usage blocks with max in kWh/day; applied to monthly usage
   as first (max * days_in_month) kWh in block 1, etc. Schedule picks which
   set of blocks (e.g. summer vs non-summer) by (month, hour).
-- Demand: when demandratestructure / flatdemandstructure present (e.g. GS-3).
+- Demand charges: when OpenEI demandratestructure / flatdemandstructure present (e.g. GS-3).
+  We normalize to demand_charge_* keys in ParsedRate.demand_charges.
 
 Demand charge implementation (for optimization model when grid block exists):
-- Flat demand (flatdemandstructure): Defined only by months. P_demandcharge >= e_t
-  for each hour t in applicable months (flatdemandmonths). The model needs to know
-  when months start and end (time-step boundaries per month) to build the
-  constraint set correctly.
-- TOU demand (demandratestructure): Same constraint but only for hours that
-  match each tier's (month, weekday/weekend, hour). demandweekdayschedule
-  and demandweekendschedule (each 12×24: schedule[month][hour] = tier index)
-  define which months, days, and hours apply to each tier. E.g. tier 1 may
+- Flat demand charge: ParsedRate.demand_charges["flat_demand_charge_structure"], flat_demand_charge_applicable_months.
+  Defined only by months. P >= grid_import for each hour in applicable months.
+- TOU demand charge: demand_charge_ratestructure, demand_charge_weekdayschedule, demand_charge_weekendschedule
+  (each 12×24: schedule[month][hour] = tier index). Same constraint but only for hours in each tier. E.g. tier 1 may
   apply summer weekday 8am–12pm and 6pm–9pm; tier 2 may apply summer weekday
   12pm–6pm. The model needs all three (months, weekdays vs weekends, hours)
   to build the correct constraint set per tier.
@@ -74,31 +71,31 @@ def _parse_schedule(
     return _fill_schedule(week), _fill_schedule(weekend)
 
 
-def _extract_demand(item: dict) -> dict | None:
-    """If rate has demand component, return normalized structure for model.utility block; else None."""
-    demand_struct = item.get("demandratestructure")
-    flat_demand = item.get("flatdemandstructure")
-    if not demand_struct and not flat_demand:
+def _extract_demand_charges(item: dict) -> dict | None:
+    """If rate has demand-charge component, return normalized structure for model.utility block; else None."""
+    tou_demand_charge_struct = item.get("demandratestructure")
+    flat_demand_charge_struct = item.get("flatdemandstructure")
+    if not tou_demand_charge_struct and not flat_demand_charge_struct:
         return None
     result: dict = {}
-    if demand_struct:
-        result["demand_type"] = "tou"
-        result["demandratestructure"] = demand_struct
+    if tou_demand_charge_struct:
+        result["demand_charge_type"] = "tou"
+        result["demand_charge_ratestructure"] = tou_demand_charge_struct
         # Normalize to 12×24 for model: schedule[month][hour] = tier index
-        result["demandweekdayschedule"] = _fill_schedule(item.get("demandweekdayschedule", []))
-        result["demandweekendschedule"] = _fill_schedule(
+        result["demand_charge_weekdayschedule"] = _fill_schedule(item.get("demandweekdayschedule", []))
+        result["demand_charge_weekendschedule"] = _fill_schedule(
             item.get("demandweekendschedule") or item.get("demandweekdayschedule", [])
         )
-    if flat_demand:
-        if "demand_type" in result:
-            result["demand_type"] = "both"
+    if flat_demand_charge_struct:
+        if "demand_charge_type" in result:
+            result["demand_charge_type"] = "both"
         else:
-            result["demand_type"] = "flat"
-        result["flatdemandstructure"] = flat_demand
+            result["demand_charge_type"] = "flat"
+        result["flat_demand_charge_structure"] = flat_demand_charge_struct
         flat_months = item.get("flatdemandmonths", [])
-        result["flatdemandmonths"] = flat_months
-        # Month indices (0–11) where flat demand applies; model uses for constraint set
-        result["flat_demand_applicable_months"] = [m for m in range(12) if m < len(flat_months) and flat_months[m]]
+        result["flat_demand_charge_months"] = flat_months
+        # Month indices (0–11) where flat demand charge applies; model uses for constraint set
+        result["flat_demand_charge_applicable_months"] = [m for m in range(12) if m < len(flat_months) and flat_months[m]]
     return result if result else None
 
 
@@ -187,7 +184,7 @@ def load_sce_rate(item: dict) -> ParsedRate:
                 "tiers_blocks": tiers_blocks,
                 "energyratestructure": energy,
             },
-            demand=_extract_demand(item),
+            demand_charges=_extract_demand_charges(item),
         )
     else:
         # TOU: one rate per tier; weekday and weekend schedules can differ.
@@ -207,5 +204,5 @@ def load_sce_rate(item: dict) -> ParsedRate:
                 "import_prices_12x24_weekday": import_prices_12x24_weekday,
                 "import_prices_12x24_weekend": import_prices_12x24_weekend,
             },
-            demand=_extract_demand(item),
+            demand_charges=_extract_demand_charges(item),
         )

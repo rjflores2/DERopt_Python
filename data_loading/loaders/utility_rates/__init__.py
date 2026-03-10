@@ -1,7 +1,7 @@
 """Utility-specific loaders for OpenEI-style rate JSON.
 
 The ``utility`` field in the JSON (normalized for lookup) routes to the right parser.
-Each loader knows that utility's semantics: TOU, monthly tiered, daily tiered, flat, demand, etc.
+Each loader knows that utility's semantics: TOU, monthly tiered, daily tiered, flat, demand charges, etc.
 Loader modules in this package are auto-discovered and registered on import.
 """
 

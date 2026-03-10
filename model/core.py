@@ -76,8 +76,8 @@ def build_model(
             financials=fin,
         )
 
-    # Grid/utility block: grid_import variable, energy cost (import_prices), demand charges (from utility_rate.demand).
-    # Attach when we have import_prices or demand data so balance can include grid and objective includes utility cost.
+    # Grid/utility block: grid_import variable, energy cost (import_prices), demand charges (from utility_rate.demand_charges).
+    # Attach when we have import_prices or demand-charge data so balance can include grid and objective includes utility cost.
     from utilities.electricity_import_export import register as register_utility_block
     register_utility_block(model, data)
 

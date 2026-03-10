@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -15,15 +16,20 @@ import pyomo.environ as pyo
 from config import get_case_config
 from model.core import build_model
 from run.build_run_data import build_run_data
+from utilities.results import extract_solution, print_solution_summary, write_timeseries_csv
 
 
 def main() -> int:
     """Run a first end-to-end data loading path for the default case."""
+    t0 = time.perf_counter()
     project_root = Path(__file__).resolve().parents[1]
     case_name = os.getenv("DEROPT_CASE", "Igiugig_xlsx")
     case_cfg = get_case_config(project_root, case_name)
 
+    print("Loading data...")
+    t_load = time.perf_counter()
     data = build_run_data(project_root, case_cfg)
+    print(f"  Data loading done in {time.perf_counter() - t_load:.1f}s")
 
     technology_parameters = case_cfg.technology_parameters or {}
     financials = asdict(case_cfg.financials) if case_cfg.financials is not None else {}
@@ -44,20 +50,32 @@ def main() -> int:
         print(f"Debug: wrote {_csv_path}")
 
     # build_model reads import_prices and utility_rate from data only (single source of truth; no extra args).
+    print("Building model...")
+    t_model = time.perf_counter()
     model = build_model(data, technology_parameters=technology_parameters, financials=financials)
+    print(f"  Model build done in {time.perf_counter() - t_model:.1f}s")
     if model is None:
         raise RuntimeError("build_model returned None; check data has electricity_load_keys, time, time_serial")
 
     # Solve with Gurobi
     solver = pyo.SolverFactory("gurobi")
     if solver.available():
+        print("Solving with Gurobi...")
+        t_solve = time.perf_counter()
         results = solver.solve(model, tee=bool(os.environ.get("DEROPT_SOLVER_TEE")))
+        print(f"  Solve done in {time.perf_counter() - t_solve:.1f}s")
         status = results.solver.status
         term = results.solver.termination_condition
-        obj_val = pyo.value(model.obj) if model.obj.is_constructed() else None
         print(f"Solver: {status} / {term}")
-        if obj_val is not None:
-            print(f"Objective value: {obj_val:.2f}")
+        if status == pyo.SolverStatus.ok and term == pyo.TerminationCondition.optimal:
+            extracted = extract_solution(model, data)
+            print("Results:")
+            print_solution_summary(extracted)
+            csv_path = os.environ.get("DEROPT_RESULTS_CSV")
+            if os.environ.get("DEROPT_EXPORT_CSV") and not csv_path:
+                csv_path = str(project_root / "results_timeseries.csv")
+            if csv_path:
+                write_timeseries_csv(extracted, csv_path)
     else:
         print("Solver: Gurobi not available (install gurobipy); skipping solve")
 
@@ -73,6 +91,7 @@ def main() -> int:
     ip = data.import_prices
     print(f"Import price vector: {'yes' if ip else 'no'}" + (f" (len={len(ip)})" if ip else ""))
     print(f"Model built: True (solar_pv block: {hasattr(model, 'solar_pv')})")
+    print(f"Total elapsed: {time.perf_counter() - t0:.1f}s")
     return 0
 
 

@@ -74,7 +74,7 @@ class CaseConfig:
     # When the JSON has multiple "items", which one to use (0-based). None = first.
     utility_rate_item_index: int | None = None
     # Optional raw 8760/N energy price file (CSV). Use for wholesale, real-time, etc.
-    # If set, this is used for the import price vector; utility_rate_path can still be set for demand/metadata.
+    # If set, this is used for the import price vector; utility_rate_path can still be set for demand charges/metadata.
     energy_price_path: Path | None = None
     # CSV column name for price ($/kWh). If None, first numeric column or only column is used.
     energy_price_column: str | None = None

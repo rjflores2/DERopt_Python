@@ -64,16 +64,16 @@ class ParsedRate:
     For tiered rates, include payload["block_direction"] = "inclining" | "declining" when known,
     so the optimization model can handle declining block (first block dearest) differently from
     inclining block (first block cheapest)."""
-    demand: dict[str, Any] | None = None
-    """Optional demand component for model.utility block. When present, structure:
-    demand_type: "flat" | "tou" | "both" – which demand components apply.
-    TOU demand (if demand_type in ("tou","both")):
-      demandratestructure, demandweekdayschedule, demandweekendschedule.
-      Schedules are 12×24: schedule[month][hour] = tier index into demandratestructure.
-    Flat demand (if demand_type in ("flat","both")):
-      flatdemandstructure, flatdemandmonths, flat_demand_applicable_months.
-      flat_demand_applicable_months: list[int] month indices 0–11 where flat demand applies.
-    Model resolves which hours fall into which demand periods from its time series."""
+    demand_charges: dict[str, Any] | None = None
+    """Optional demand-charge component for model.utility block. When present, structure:
+    demand_charge_type: "flat" | "tou" | "both" – which demand-charge components apply.
+    TOU demand charge (if demand_charge_type in ("tou","both")):
+      demand_charge_ratestructure, demand_charge_weekdayschedule, demand_charge_weekendschedule.
+      Schedules are 12×24: schedule[month][hour] = tier index into demand_charge_ratestructure.
+    Flat demand charge (if demand_charge_type in ("flat","both")):
+      flat_demand_charge_structure, flat_demand_charge_months, flat_demand_charge_applicable_months.
+      flat_demand_charge_applicable_months: list[int] month indices 0–11 where flat demand charge applies.
+    Model resolves which hours fall into which demand-charge periods from its time series."""
 
 
 def load_openei_rate(

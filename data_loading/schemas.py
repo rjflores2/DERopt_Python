@@ -10,13 +10,13 @@ class DataContainer:
 
     indices/timeseries/static: load and resource series (solar, etc.) and time index.
     import_prices: resolved $/kWh per period (from OpenEI or raw 8760/N), aligned to container time.
-    utility_rate: optional ParsedRate for demand/metadata when grid block exists.
+    utility_rate: optional ParsedRate for demand charges/metadata when grid block exists.
     """
 
     indices: dict[str, Any] = field(default_factory=dict)
     timeseries: dict[str, Any] = field(default_factory=dict)
     static: dict[str, Any] = field(default_factory=dict)
-    # Utility: single import price vector and optional rate metadata (demand, etc.)
+    # Utility: single import price vector and optional rate metadata (demand charges, etc.)
     import_prices: list[float] | None = None
     utility_rate: Any = None
 
