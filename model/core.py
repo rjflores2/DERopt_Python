@@ -112,9 +112,13 @@ def build_model(
 
     model.electricity_sources = pyo.Expression(model.NODES, model.T, rule=_sources_rule)
 
-    # Sinks: for now load only; extend with storage charging etc. when those modules exist.
+    # Sinks: load plus any storage charging or other sink terms defined on blocks.
     def _sinks_rule(m, n, t):
-        return m.electricity_load[n, t]
+        total = m.electricity_load[n, t]
+        for blk in m.component_objects(pyo.Block, descend_into=False):
+            if hasattr(blk, "electricity_sink_term"):
+                total += blk.electricity_sink_term[n, t]
+        return total
 
     model.electricity_sinks = pyo.Expression(model.NODES, model.T, rule=_sinks_rule)
 
