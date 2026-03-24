@@ -20,7 +20,11 @@ from utilities.results import extract_solution, print_solution_summary, write_ti
 
 
 def main() -> int:
-    """Run a first end-to-end data loading path for the default case."""
+    """Run a first end-to-end data loading path for the default case.
+
+    After loading, prints ``electricity_load_keys`` and ``solar_production_keys`` for
+    config authoring (e.g. area limits). Set DEROPT_QUIET=1 to suppress that block.
+    """
     t0 = time.perf_counter()
     project_root = Path(__file__).resolve().parents[1]
     case_name = os.getenv("DEROPT_CASE", "Igiugig_xlsx")
@@ -30,6 +34,15 @@ def main() -> int:
     t_load = time.perf_counter()
     data = build_run_data(project_root, case_cfg)
     print(f"  Data loading done in {time.perf_counter() - t_load:.1f}s")
+
+    if not os.environ.get("DEROPT_QUIET"):
+        load_keys = data.static.get("electricity_load_keys") or []
+        print(f"  electricity_load_keys ({len(load_keys)}): {load_keys}")
+        solar_keys = data.static.get("solar_production_keys") or []
+        if solar_keys:
+            print(f"  solar_production_keys ({len(solar_keys)}): {solar_keys}")
+        else:
+            print("  solar_production_keys: (none)")
 
     technology_parameters = case_cfg.technology_parameters or {}
     financials = asdict(case_cfg.financials) if case_cfg.financials is not None else {}
