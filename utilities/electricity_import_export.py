@@ -27,11 +27,49 @@ def _tier_for_tou_demand_charge(dt, demand_charges: dict) -> int:
 
 
 def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
-    """Attach grid/utility block when import_prices or demand-charge data is present.
+    """
+    Build and attach the grid / utility import block when energy prices and/or demand charges
+    are available; otherwise return ``None``.
 
-    Block provides: grid_import[node,t] (Var), electricity_source_term = grid_import,
-    objective_contribution = energy cost + demand charge cost. So balance becomes
-    solar + grid_import + ... = load.
+    1. Data and other inputs
+
+       - ``model.T``                                -> time periods (from ``model.core``).
+       - ``model.NODES``                            -> node keys (same as ``electricity_load_keys``).
+       - ``model.import_prices``                    -> optional length-|T| energy price vector ($/kWh); may be
+                                                       absent if only demand charges are modeled (then prices default to 0).
+       - ``model.utility_rate``                     -> optional parsed tariff; ``demand_charges`` supplies flat/TOU demand logic.
+       - ``data.timeseries["datetime"]``            -> timestamps for mapping hours to bill months / TOU tiers when present.
+
+    2. Variables (Pyomo ``Var``)
+
+       - ``grid_import[node, t]``                   -> grid energy purchased in period ``t`` (kWh).
+       - ``P_flat_m{month}``                        -> flat-demand peak proxy (kW) per applicable bill month, when configured.
+       - ``P_tou_tier{tier}``                       -> TOU demand peak proxy (kW) per rate tier, when configured.
+
+    3. Parameters (Pyomo ``Param``)
+
+       - ``import_price[t]``                        -> energy price ($/kWh) per period (zeros if only demand charges).
+
+    4. Contribution to electricity sources — ``electricity_source_term[node, t]``
+
+       - ``grid_import[node, t]``
+
+    5. Contribution to electricity sinks — ``electricity_sink_term``
+
+       - (none on this block; grid imports are supply-only here.)
+
+    6. Contribution to the cost function — ``objective_contribution``
+
+       - ``energy_import_cost``                     -> ``sum_t import_price[t] * sum_n grid_import[n,t]``.
+       - ``nonTOU_Demand_Charge_Cost``              -> flat demand charge $ when ``demand_charge_type`` includes flat/both.
+       - ``TOU_Demand_Charge_Cost``                 -> TOU demand charge $ when type includes tou/both.
+       - ``objective_contribution``                 -> sum of energy + flat + TOU expressions above.
+       - ``cost_existing_annual``                  -> ``0`` (placeholder for symmetry with tech blocks).
+
+    7. Constraints
+
+       - ``flat_demand_charge_ub_m*_t*``           -> ``P_flat`` for month ``>=`` sum of nodal ``grid_import`` in that month’s hours.
+       - ``tou_demand_charge_ub_tier*_t*``         -> ``P_tier`` ``>=`` sum of nodal ``grid_import`` for hours mapped to that tier.
     """
     import_prices = getattr(model, "import_prices", None)
     utility_rate = getattr(model, "utility_rate", None)
@@ -128,6 +166,8 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
 
 
 def register(model: Any, data: Any) -> pyo.Block | None:
-    """Registration hook used by core: attach grid/utility block if data supports it."""
+    """
+    Registry hook used by ``model.core``: call ``_add_utility_block`` (returns a block or ``None``).
+    """
     return _add_utility_block(model, data)
 

@@ -57,28 +57,55 @@ def add_battery_energy_storage_block(
     financials: dict[str, Any] | None = None,
 ) -> pyo.Block:
     """
-    Build and attach the Battery Energy Storage block to the model.
+    Build and attach the Battery Energy Storage block (one node per load bus, one time index
+    per optimization period). Storage power is in kW; state of charge in kWh.
 
-    Battery is optimized at each node (one per load) and time step.
+    1. Data and other inputs
 
-    Data used:
-        - model.T, model.NODES -> time and node sets (created in core from data)
-        - battery_params       -> optional overrides for technical/economic params
+       - ``model.T``                                -> time periods (from ``model.core``).
+       - ``model.NODES``                            -> node keys (same as ``electricity_load_keys``).
+       - ``battery_params``                         -> user options; merged with defaults in
+                                                       ``_resolve_battery_block_inputs``.
+       - ``financials``                             -> used to annualize capital on adopted kWh capacity.
 
-    Block contents (per node n and time t):
-        - Vars:
-            energy_state[n, t]          [kWh]  state of charge
-            charge_power[n, t]          [kW]   charging power (electricity sink)
-            discharge_power[n, t]       [kW]   discharging power (electricity source)
-            energy_capacity_adopted[n]  [kWh]  adopted energy capacity (if allow_adoption)
-        - Constraints:
-            Energy balance over time (cyclic or with fixed initial SOC).
-            0 <= energy_state[n, t] <= existing + adopted capacity.
-            charge_power and discharge_power limited by C‑rates * capacity.
-        - Expressions:
-            electricity_source_term[n, t] = discharge_power[n, t]
-            electricity_sink_term[n, t]   = charge_power[n, t]
-            objective_contribution: annualized capital + O&M on total capacity.
+    2. Variables (Pyomo ``Var``)
+
+       - ``energy_state[node, t]``                  -> state of charge (kWh).
+       - ``charge_power[node, t]``                  -> charging power (kW); draws from the bus.
+       - ``discharge_power[node, t]``               -> discharging power (kW); feeds the bus.
+       - ``energy_capacity_adopted[node]``          -> incremental storage energy capacity (kWh) if
+                                                       ``allow_adoption`` is True.
+
+    3. Parameters / resolved inputs (from ``battery_params``; drive rules via ``_ResolvedBatteryInputs``)
+
+       - Charge and discharge leg efficiencies, C-rates (max kW per kWh), ``$/kWh`` capital and O&M,
+         existing kWh per node, optional ``initial_soc_fraction`` — see ``DEFAULT_BATTERY_PARAMS``.
+
+    4. Other named components on the block
+
+       - ``total_energy_capacity[node]``            -> ``Expression``; existing + adopted kWh (or existing only).
+
+    5. Contribution to electricity sources — ``electricity_source_term[node, t]``
+
+       - ``discharge_power[node, t]``
+
+    6. Contribution to electricity sinks — ``electricity_sink_term[node, t]``
+
+       - ``charge_power[node, t]``
+
+    7. Contribution to the cost function — ``objective_contribution``
+
+       - If ``allow_adoption``: annualized capital on adopted kWh + O&M on total (existing + adopted) kWh.
+       - If not: O&M on existing kWh only.
+       - ``cost_existing_annual``                  -> O&M on existing kWh (reporting; when adoption is on).
+
+    8. Constraints
+
+       - ``energy_capacity_limit``                  -> ``energy_state <= total_energy_capacity``.
+       - ``charge_power_limit`` / ``discharge_power_limit`` -> power ``<=`` C-rate ``*`` total kWh capacity.
+       - ``energy_balance``                         -> SOC update vs previous period; wraps last→first period
+                                                       for a cyclic horizon unless ``initial_soc`` is added.
+       - ``initial_soc`` (optional)                 -> fixes SOC at first period when ``initial_soc_fraction`` is set.
     """
     T = model.T
     NODES = list(model.NODES)
@@ -204,10 +231,9 @@ def register(
     financials: dict[str, Any] | None = None,
 ) -> pyo.Block:
     """
-    Attach the Battery Energy Storage block.
+    Registry hook: build the battery block via ``add_battery_energy_storage_block``.
 
-    Called by core from the technology registry. Params are read from
-    technology_parameters["battery_energy_storage"].
+    - ``technology_parameters["battery_energy_storage"]`` -> dict passed as ``battery_params`` (``{}`` uses defaults).
     """
     battery_params = (technology_parameters or {}).get("battery_energy_storage") or {}
     return add_battery_energy_storage_block(

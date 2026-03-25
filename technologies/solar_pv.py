@@ -71,7 +71,6 @@ def add_solar_pv_block(
     per solar resource column). The same solar potential time series is used at every node.
 
     1. Data and other inputs
-
        - ``model.T``                                -> time periods (from ``model.core``) -> time index
        - ``model.NODES``                            -> node keys (from ``model.core``, same as
          ``data.static["electricity_load_keys"]``)  -> node index indicating the locations where solar PV can be installed and/or operated
@@ -100,52 +99,50 @@ def add_solar_pv_block(
        - existing solar           -> If there is existing solar, we add O&M and remaining capital payments
 
     6. Constraints
-       - ``generation_limits_rule``                      ->  solar_generation <= (solar_capacity_adopted + existing_solar_capacity)*solar_potential`` 
+       - ``generation_limits_rule``                 ->  solar_generation <= (solar_capacity_adopted + existing_solar_capacity)*solar_potential`` 
        - ``generation_limits_rule_existing_only``   ->  (existing + adopted) / efficiency <= max_capacity_area
     """
-    T = model.T
-    NODES = list(model.NODES)
+    T = model.T # time index
+    NODES = list(model.NODES) # node index
 
-    solar_keys = data.static.get("solar_production_keys") or []
-    if not solar_keys:
+    SOLAR = list(data.static.get("solar_production_keys") or []) # Name of solar profiles
+    if not SOLAR:
         raise ValueError("solar_pv block requires data.static['solar_production_keys'] (load solar data first)")
-    SOLAR = list(solar_keys)
-    production_by_profile = {key: list(data.timeseries[key]) for key in SOLAR}
+    production_by_profile = {key: list(data.timeseries[key]) for key in SOLAR} # Solar resource potential time series data (kWh/kW installed capacity)
 
-    r = _resolve_solar_block_inputs(solar_pv_params, financials, NODES, SOLAR)
-    allow_adoption = (solar_pv_params or {}).get("allow_adoption", True)
-    _nodes = model.NODES
+    r = _resolve_solar_block_inputs(solar_pv_params, financials, NODES, SOLAR) # Resolve solar block inputs - overwrites default solar parameters with user inputs
+    allow_adoption = (solar_pv_params or {}).get("allow_adoption", True) # Checks if we are allowing adoption in current optimization run, if False, only existing capacity is modeled (no adoption variable); default True.
 
-    def block_rule(b):
-        b.SOLAR = pyo.Set(initialize=SOLAR, ordered=True)
+    def block_rule(b): # block_rule builds the solar PV pyomo model
+        b.SOLAR = pyo.Set(initialize=SOLAR, ordered=True) # Set of solar profiles
 
-        b.solar_potential = pyo.Param(
+        b.solar_potential = pyo.Param( # Solar resource potential time series data (kWh/kW installed capacity)
             b.SOLAR, T,
             initialize={(p, t): production_by_profile[p][t] for p in SOLAR for t in T},
             within=pyo.NonNegativeReals,
             mutable=True,
         )
-        b.efficiency = pyo.Param(
+        b.efficiency = pyo.Param( # Solar PV system efficiency from solar_pv_params / params_by_profile
             b.SOLAR,
             initialize={p: r.efficiency_list[i] for i, p in enumerate(SOLAR)},
             within=pyo.NonNegativeReals, mutable=True,
         )
-        b.capital_cost_per_kw = pyo.Param(
+        b.capital_cost_per_kw = pyo.Param( # Solar PV capital cost ($/kW installed) from solar_pv_params / params_by_profile 
             b.SOLAR,
             initialize={p: r.capital_list[i] for i, p in enumerate(SOLAR)},
             within=pyo.NonNegativeReals, mutable=True,
         )
-        b.om_per_kw_year = pyo.Param(
+        b.om_per_kw_year = pyo.Param( # Solar PV fixed O&M cost ($/kW installed*year) from solar_pv_params / params_by_profile 
             b.SOLAR,
             initialize={p: r.om_list[i] for i, p in enumerate(SOLAR)},
             within=pyo.NonNegativeReals, mutable=True,
         )
-        b.existing_solar_capacity = pyo.Param(
-            _nodes, b.SOLAR,
+        b.existing_solar_capacity = pyo.Param( # Potentially existing solar capacity at each node (kW)
+            NODES, b.SOLAR,
             initialize=r.existing_init,
             within=pyo.NonNegativeReals, mutable=True,
         )
-        if r.has_area_limits:
+        if r.has_area_limits: # If there are area limits, then initialize sets and parameters assocaited with this area.
             # User gave at least one (node, profile) -> max area (m2).
             b.AREA_LIMIT_INDEX = pyo.Set(
                 dimen=2, initialize=r.area_index, ordered=True
@@ -157,20 +154,20 @@ def add_solar_pv_block(
                 mutable=True,
             )
 
-        b.solar_generation = pyo.Var(_nodes, b.SOLAR, T, within=pyo.NonNegativeReals)
+        b.solar_generation = pyo.Var(NODES, b.SOLAR, T, within=pyo.NonNegativeReals)
 
         if allow_adoption:
-            b.solar_capacity_adopted = pyo.Var(_nodes, b.SOLAR, within=pyo.NonNegativeReals)
+            b.solar_capacity_adopted = pyo.Var(NODES, b.SOLAR, within=pyo.NonNegativeReals)
 
-            def generation_limits_rule(m, node, profile, t):
+            def generation_limits_rule(m, node, profile, t): # Constraint that limites solar production to installed capacity and current solar resource
                 return m.solar_generation[node, profile, t] <= (
                     (m.existing_solar_capacity[node, profile] + m.solar_capacity_adopted[node, profile])
                     * m.solar_potential[profile, t]
                 )
-            b.generation_limits = pyo.Constraint(_nodes, b.SOLAR, T, rule=generation_limits_rule)
+            b.generation_limits = pyo.Constraint(NODES, b.SOLAR, T, rule=generation_limits_rule)
 
-            if r.has_area_limits:
-                def capacity_area_cap_rule(m, node, profile):
+            if r.has_area_limits: # Checking if there is an active area limit for some type of solar at a node
+                def capacity_area_cap_rule(m, node, profile): # Constraining solar at nodes with limits
                     return (
                         (m.existing_solar_capacity[node, profile] + m.solar_capacity_adopted[node, profile])
                         / m.efficiency[profile]
@@ -179,14 +176,14 @@ def add_solar_pv_block(
                     b.AREA_LIMIT_INDEX, rule=capacity_area_cap_rule
                 )
 
-            # Objective: annualized capital on adopted kW; O&M on (existing + adopted);
-            # optional capital recovery on existing kW only (see solar_pv_params).
+            # Objective: annualized capital on adopted kW; O&M on existing and adopted solar;
+            # optional capital recovery on existing kW only if this is considered by the user 
             b.objective_contribution = sum(
                 b.capital_cost_per_kw[p] * b.solar_capacity_adopted[n, p] * r.amortization_factor
                 + b.om_per_kw_year[p] * (b.existing_solar_capacity[n, p] + b.solar_capacity_adopted[n, p])
                 + r.existing_cap_recovery_per_kw[i] * b.existing_solar_capacity[n, p]
                 for i, p in enumerate(b.SOLAR)
-                for n in _nodes
+                for n in NODES
             )
             # Slice of annual cost attributable to existing assets (for reporting).
             b.cost_existing_annual = pyo.Expression(
@@ -194,7 +191,7 @@ def add_solar_pv_block(
                     b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
                     + r.existing_cap_recovery_per_kw[i] * b.existing_solar_capacity[n, p]
                     for i, p in enumerate(b.SOLAR)
-                    for n in _nodes
+                    for n in NODES
                 )
             )
         else:
@@ -203,25 +200,25 @@ def add_solar_pv_block(
                 return m.solar_generation[node, profile, t] <= (
                     m.existing_solar_capacity[node, profile] * m.solar_potential[profile, t]
                 )
-            b.generation_limits = pyo.Constraint(_nodes, b.SOLAR, T, rule=generation_limits_rule_existing_only)
+            b.generation_limits = pyo.Constraint(NODES, b.SOLAR, T, rule=generation_limits_rule_existing_only)
 
             b.objective_contribution = sum(
                 b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
                 + r.existing_cap_recovery_per_kw[i] * b.existing_solar_capacity[n, p]
                 for i, p in enumerate(b.SOLAR)
-                for n in _nodes
+                for n in NODES
             )
             b.cost_existing_annual = pyo.Expression(
                 expr=sum(
                     b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
                     + r.existing_cap_recovery_per_kw[i] * b.existing_solar_capacity[n, p]
                     for i, p in enumerate(b.SOLAR)
-                    for n in _nodes
+                    for n in NODES
                 )
             )
 
         b.electricity_source_term = pyo.Expression(
-            _nodes, T,
+            NODES, T,
             rule=lambda m, n, t: sum(m.solar_generation[n, p, t] for p in m.SOLAR),
         )
 
@@ -237,10 +234,11 @@ def register(
     financials: dict[str, Any] | None = None,
 ) -> pyo.Block | None:
     """
-    Attach the Solar PV block if solar data is present; otherwise do nothing.
+    Registry hook: if ``data.static["solar_production_keys"]`` is non-empty, call
+    ``add_solar_pv_block``; else return ``None``.
 
-    Called by core from the technology registry. Params are read from
-    ``technology_parameters["solar_pv"]``. Returns the block if attached, None otherwise.
+    - ``technology_parameters["solar_pv"]``        -> dict passed as ``solar_pv_params`` (``{}`` uses defaults).
+    - ``financials``                               -> passed through for amortization on adopted solar.
     """
     if not data.static.get("solar_production_keys"):
         return None
