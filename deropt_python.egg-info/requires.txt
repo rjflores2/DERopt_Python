@@ -1,0 +1,10 @@
+pyomo
+gurobipy
+pandas
+openpyxl
+xlrd
+numpy
+scipy
+
+[dev]
+pytest

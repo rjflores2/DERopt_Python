@@ -1,7 +1,9 @@
 """Pre-solve diagnostics: detect suspicious model/data setups (warnings only).
 
 System-wide checks (horizon, utility/tariff, import prices, demand vs timestep) live here.
-Equipment capital / O&M warnings are delegated to ``technologies.TECH_DIAGNOSTICS``.
+Equipment capital / O&M warnings are delegated to technology modules that define
+``collect_equipment_cost_diagnostics`` (discovered under the ``technologies`` package via
+``pkgutil``, excluding ``equipment_cost_diagnostics``).
 
 Also extend via ``register_diagnostic_check`` for ad-hoc hooks. Do not mutate the model or solve.
 """
@@ -138,12 +140,27 @@ def _check_negative_import_prices(data: Any) -> list[str]:
     return [f"import_prices contains negative values (min = {min(neg):.6g} $/kWh)."]
 
 
-def _collect_technology_diagnostics(model: Any, data: Any, case_cfg: Any) -> list[str]:
-    """Delegate equipment / O&M warnings to registered technology modules (``technologies.TECH_DIAGNOSTICS``)."""
-    from technologies import TECH_DIAGNOSTICS
+def _iter_technology_diagnostic_collectors():
+    """Yield ``collect_equipment_cost_diagnostics`` functions from ``technologies.<module>``."""
+    import importlib
+    import pkgutil
 
+    import technologies as tech_pkg
+
+    skip = frozenset({"equipment_cost_diagnostics"})
+    for info in pkgutil.iter_modules(tech_pkg.__path__):
+        if info.name in skip:
+            continue
+        mod = importlib.import_module(f"technologies.{info.name}")
+        fn = getattr(mod, "collect_equipment_cost_diagnostics", None)
+        if callable(fn):
+            yield fn
+
+
+def _collect_technology_diagnostics(model: Any, data: Any, case_cfg: Any) -> list[str]:
+    """Delegate equipment / O&M warnings to technology modules (plug-in discovery)."""
     out: list[str] = []
-    for _key, collect_fn in TECH_DIAGNOSTICS:
+    for collect_fn in _iter_technology_diagnostic_collectors():
         out.extend(collect_fn(model, data, case_cfg))
     return out
 

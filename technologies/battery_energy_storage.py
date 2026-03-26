@@ -106,6 +106,16 @@ def add_battery_energy_storage_block(
        - ``energy_balance``                         -> SOC update vs previous period; wraps last→first period
                                                        for a cyclic horizon unless ``initial_soc`` is added.
        - ``initial_soc`` (optional)                 -> fixes SOC at first period when ``initial_soc_fraction`` is set.
+
+    Notes (alignment with other Pyomo block builders):
+
+    - This docstring follows the same layout pattern as the Solar PV block builder in
+      ``technologies/solar_pv.py`` (explicit sections for inputs, sets, variables, parameters,
+      objective contribution, constraints) and the utility import block in
+      ``utilities/electricity_import_export.py``.
+    - Battery contributes to the system electricity balance by defining both
+      ``electricity_source_term`` (discharge) and ``electricity_sink_term`` (charge),
+      analogous to how the utility block contributes ``electricity_source_term`` via grid imports.
     """
     T = model.T
     NODES = list(model.NODES)
@@ -320,10 +330,7 @@ def _resolve_battery_block_inputs(
     # Cost parameters
     capital = float(params["capital_cost_per_kwh"])
     om = float(params["om_per_kwh_year"])
-    if capital < 0 or om < 0:
-        raise ValueError(
-            "battery_energy_storage: capital_cost_per_kwh and om_per_kwh_year must be >= 0."
-        )
+    # Negative capital / O&M are not hard errors: pre-solve diagnostics warn; model still builds.
 
     # Power (C‑rate) limits
     max_charge_c = float(params["max_charge_power_per_kwh"])

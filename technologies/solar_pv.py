@@ -131,15 +131,17 @@ def add_solar_pv_block(
             initialize={p: r.efficiency_list[i] for i, p in enumerate(SOLAR)},
             within=pyo.NonNegativeReals, mutable=True,
         )
-        b.capital_cost_per_kw = pyo.Param( # Solar PV capital cost ($/kW installed) from solar_pv_params / params_by_profile 
+        b.capital_cost_per_kw = pyo.Param( # Solar PV capital cost ($/kW installed) from solar_pv_params / params_by_profile
             b.SOLAR,
             initialize={p: r.capital_list[i] for i, p in enumerate(SOLAR)},
-            within=pyo.NonNegativeReals, mutable=True,
+            within=pyo.Reals,
+            mutable=True,
         )
-        b.om_per_kw_year = pyo.Param( # Solar PV fixed O&M cost ($/kW installed*year) from solar_pv_params / params_by_profile 
+        b.om_per_kw_year = pyo.Param(  # Solar PV fixed O&M cost ($/kW installed*year) from solar_pv_params / params_by_profile
             b.SOLAR,
             initialize={p: r.om_list[i] for i, p in enumerate(SOLAR)},
-            within=pyo.NonNegativeReals, mutable=True,
+            within=pyo.Reals,
+            mutable=True,
         )
         b.existing_solar_capacity = pyo.Param( # Potentially existing solar capacity at each node (kW)
             NODES, b.SOLAR,
@@ -260,7 +262,7 @@ def collect_equipment_cost_diagnostics(
     _data: Any,
     _case_cfg: Any,
 ) -> list[str]:
-    """Diagnostics hook: warn on negative or all-zero capital / O&M per solar profile (see ``TECH_DIAGNOSTICS``)."""
+    """Diagnostics hook: warn on negative or all-zero capital / O&M per profile (auto-discovered by model_diagnostics)."""
     if not hasattr(model, "solar_pv"):
         return []
     from technologies.equipment_cost_diagnostics import equipment_capital_om_warnings
@@ -366,12 +368,8 @@ def _existing_capital_recovery_per_kw_list(
             val = cap_kw * amortization_factor
         else:
             val = 0.0
-        profile_label = key if i < len(solar_keys) else f"profile index {i}"
-        if val < 0:
-            raise ValueError(
-                f"solar_pv: existing capital recovery for {profile_label!r} must be >= 0, got {val}. "
-                "Check existing_capital_recovery_per_kw_year and use_marginal_capital_for_existing_recovery."
-            )
+        # Negative recovery can follow negative marginal capital when use_marginal_capital_for_existing_recovery
+        # is set; pre-solve diagnostics warn on negative capital — do not hard-fail here.
         out.append(val)
     return out
 
@@ -382,22 +380,16 @@ def _validate_solar_params(
     capital_list: list[float],
     om_list: list[float],
 ) -> None:
-    """Raise ValueError if any solar_pv parameter is invalid (e.g. efficiency 0 or negative)."""
-    for i, (eff, cap, om) in enumerate(zip(efficiency_list, capital_list, om_list)):
+    """Raise ValueError if any solar_pv parameter is invalid (e.g. efficiency out of range).
+
+    Negative capital_cost_per_kw / om_per_kw_year are allowed so pre-solve diagnostics can warn;
+    the model still builds (Pyomo cost params use Reals).
+    """
+    for i, (eff, _cap, _om) in enumerate(zip(efficiency_list, capital_list, om_list)):
         profile_label = solar_keys[i] if i < len(solar_keys) else f"profile index {i}"
         if eff <= 0 or eff > 1:
             raise ValueError(
                 f"solar_pv: efficiency for {profile_label!r} must be in (0, 1], got {eff}. "
-                "Check technology_parameters['solar_pv'] and params_by_profile."
-            )
-        if cap < 0:
-            raise ValueError(
-                f"solar_pv: capital_cost_per_kw for {profile_label!r} must be >= 0, got {cap}. "
-                "Check technology_parameters['solar_pv'] and params_by_profile."
-            )
-        if om < 0:
-            raise ValueError(
-                f"solar_pv: om_per_kw_year for {profile_label!r} must be >= 0, got {om}. "
                 "Check technology_parameters['solar_pv'] and params_by_profile."
             )
 

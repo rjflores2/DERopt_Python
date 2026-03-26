@@ -132,8 +132,12 @@ def _extract_demand_charges(item: dict) -> dict | None:
         result["flat_demand_charge_structure"] = flat_demand_charge_struct
         flat_months = item.get("flatdemandmonths", [])
         result["flat_demand_charge_months"] = flat_months
-        # Month indices (0–11) where flat demand charge applies; model uses for constraint set
-        result["flat_demand_charge_applicable_months"] = [m for m in range(12) if m < len(flat_months) and flat_months[m]]
+        # URDB/OpenEI flatdemandmonths is typically a 12-long list mapping each month to a
+        # structure index (e.g. winter=0, summer=1). Note that 0 is a valid index.
+        # Treat months as applicable when a mapping exists (not when the value is truthy).
+        result["flat_demand_charge_applicable_months"] = [
+            m for m in range(12) if m < len(flat_months) and flat_months[m] is not None
+        ]
     return result if result else None
 
 
