@@ -244,6 +244,37 @@ def register(
     )
 
 
+def collect_equipment_cost_diagnostics(
+    model: Any,
+    _data: Any,
+    case_cfg: Any,
+) -> list[str]:
+    """Diagnostics hook: warn on negative or all-zero battery capital / O&M (merged config vs defaults)."""
+    if case_cfg is None or not hasattr(model, "battery_energy_storage"):
+        return []
+    tech = getattr(case_cfg, "technology_parameters", None) or {}
+    if tech.get("battery_energy_storage") is None:
+        return []
+    bp = tech.get("battery_energy_storage")
+    params = {**DEFAULT_BATTERY_PARAMS, **(bp if isinstance(bp, dict) else {})}
+    try:
+        cap = float(params.get("capital_cost_per_kwh", 0) or 0)
+        om = float(params.get("om_per_kwh_year", 0) or 0)
+    except (TypeError, ValueError):
+        return [
+            "battery_energy_storage: could not read capital_cost_per_kwh / om_per_kwh_year for diagnostics."
+        ]
+    from technologies.equipment_cost_diagnostics import equipment_capital_om_warnings
+
+    return equipment_capital_om_warnings(
+        "Battery",
+        cap,
+        om,
+        capital_name="capital_cost_per_kwh",
+        om_name="om_per_kwh_year",
+    )
+
+
 # -----------------------------------------------------------------------------
 # Plumbing (helpers used by add_battery_energy_storage_block)
 # -----------------------------------------------------------------------------

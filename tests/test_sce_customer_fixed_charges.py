@@ -19,8 +19,10 @@ def test_extract_customer_fixed_charges_via_minimal_item():
     assert r.customer_fixed_charges is not None
     assert r.customer_fixed_charges["first_meter"]["amount"] == 702.22
     assert r.customer_fixed_charges["first_meter"]["units"] == "$/month"
-    assert r.customer_fixed_charges["minimum"]["amount"] == 1.5
-    assert r.customer_fixed_charges["minimum"]["units"] == "$/day"
+    assert "minimum" not in r.customer_fixed_charges
+    assert r.minimum_meter_charge is not None
+    assert r.minimum_meter_charge["amount"] == 1.5
+    assert r.minimum_meter_charge["units"] == "$/day"
 
 
 def test_sce_d_tou_and_gs3_fixed_charges_differ():
@@ -40,14 +42,18 @@ def test_sce_d_tou_and_gs3_fixed_charges_differ():
     assert d.customer_fixed_charges is not None
     assert g.customer_fixed_charges is not None
 
-    # D-TOU: small $/day first meter + minimum from sample JSON
+    # D-TOU: small $/day first meter; mincharge is metadata only (not in customer_fixed_charges)
     assert d.customer_fixed_charges["first_meter"]["units"] == "$/day"
     assert d.customer_fixed_charges["first_meter"]["amount"] == 0.031
-    assert "minimum" in d.customer_fixed_charges
+    assert "minimum" not in d.customer_fixed_charges
+    assert d.minimum_meter_charge is not None
+    assert d.minimum_meter_charge["amount"] == 0.346
+    assert d.minimum_meter_charge["units"] == "$/day"
 
     # GS-3: larger $/month first meter; sample had no mincharge key
     assert g.customer_fixed_charges["first_meter"]["units"] == "$/month"
     assert g.customer_fixed_charges["first_meter"]["amount"] == 702.22
+    assert g.minimum_meter_charge is None
 
     assert d.demand_charges is None
     assert g.demand_charges is not None

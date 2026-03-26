@@ -75,16 +75,14 @@ class ParsedRate:
       flat_demand_charge_applicable_months: list[int] month indices 0–11 where flat demand charge applies.
     Model resolves which hours fall into which demand-charge periods from its time series."""
     customer_fixed_charges: dict[str, Any] | None = None
-    """Optional usage-independent customer charges from the rate JSON (when the utility loader fills them).
+    """Optional true fixed customer charges (daily or monthly rates only).
 
-    Normalized shape (SCE / OpenEI-style):
-      ``first_meter``: ``{"amount": float, "units": str}`` from ``fixedchargefirstmeter`` and
-      ``fixedchargeunits`` (e.g. ``"$/day"``, ``"$/month"``).
-      ``minimum``: ``{"amount": float, "units": str}`` from ``mincharge`` and ``minchargeunits`` when present.
-
-    Total USD over the simulation horizon is computed in
-    ``customer_charge_horizon.fixed_customer_charges_horizon_usd`` using
-    ``data.timeseries["datetime"]`` and added to the utility block objective."""
+    SCE / OpenEI: ``first_meter`` from ``fixedchargefirstmeter`` and ``fixedchargeunits``.
+    Horizon USD is computed in ``customer_charge_horizon.fixed_customer_charges_horizon_usd`` and
+    added to the utility objective. Minimum bill logic is separate — see ``minimum_meter_charge``."""
+    minimum_meter_charge: dict[str, Any] | None = None
+    """Optional metadata only (not optimized): URDB ``mincharge`` / ``minchargeunits`` — minimum bill
+    if usage would otherwise be below that level; not a daily/monthly fixed service charge."""
 
 
 def load_openei_rate(

@@ -16,6 +16,7 @@ import pyomo.environ as pyo
 from config import get_case_config
 from model.core import build_model
 from run.build_run_data import build_run_data
+from utilities.model_diagnostics import collect_model_diagnostics, print_model_diagnostics
 from utilities.results import extract_solution, print_solution_summary, write_timeseries_csv
 
 
@@ -69,6 +70,10 @@ def main() -> int:
     print(f"  Model build done in {time.perf_counter() - t_model:.1f}s")
     if model is None:
         raise RuntimeError("build_model returned None; check data has electricity_load_keys, time, time_serial")
+
+    diag = collect_model_diagnostics(model, data, case_cfg)
+    if diag:
+        print_model_diagnostics(diag)
 
     # Solve with Gurobi
     solver = pyo.SolverFactory("gurobi")

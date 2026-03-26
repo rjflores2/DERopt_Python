@@ -32,13 +32,14 @@ def test_monthly_prorated_partial_month():
     assert fixed_customer_charges_horizon_usd(fc, dts) == pytest.approx(15.0)
 
 
-def test_two_components_first_meter_and_minimum():
+def test_legacy_minimum_key_ignored():
+    """URDB mincharge must not be folded into fixed horizon USD; ignore if present in dict."""
     dts = [datetime(2024, 3, 1, 12, 0) + timedelta(days=i) for i in range(10)]
     fc = {
         "first_meter": {"amount": 1.0, "units": "$/day"},
         "minimum": {"amount": 0.5, "units": "$/day"},
     }
-    assert fixed_customer_charges_horizon_usd(fc, dts) == pytest.approx(10.0 + 5.0)
+    assert fixed_customer_charges_horizon_usd(fc, dts) == pytest.approx(10.0)
 
 
 def test_none_datetimes_skipped():

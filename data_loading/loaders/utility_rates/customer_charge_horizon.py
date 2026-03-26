@@ -1,8 +1,8 @@
-"""Horizon scaling for usage-independent utility customer charges (fixed meter, minimum, etc.).
+"""Horizon scaling for true fixed utility customer charges (daily or monthly rates only).
 
 OpenEI-style JSON exposes amounts with unit strings such as ``$/day`` and ``$/month``.
 This module converts those to total **USD over the simulation window** using the model's
-time series of datetimes.
+time series of datetimes. Minimum bill amounts (URDB ``mincharge``) are not included here.
 
 * **Daily** charges: ``amount × (number of distinct calendar days with at least one timestep)``.
 * **Monthly** charges: for each calendar month that overlaps the simulation, charge is
@@ -79,8 +79,8 @@ def fixed_customer_charges_horizon_usd(
     """
     Total fixed customer-charge USD over the horizon represented by ``datetimes``.
 
-    Sums all supported entries in ``customer_fixed_charges`` (e.g. ``first_meter``,
-    ``minimum``), each with ``amount`` and ``units``.
+    Uses ``first_meter`` only (true daily/monthly fixed charges), each with ``amount`` and ``units``.
+    A legacy ``minimum`` key in the dict, if present, is ignored.
 
     Timesteps with ``datetime is None`` are skipped. If no valid timestamps remain,
     returns ``0.0``.
@@ -104,25 +104,20 @@ def fixed_customer_charges_horizon_usd(
     if not distinct_dates:
         return 0.0
 
-    out = 0.0
-    for key in ("first_meter", "minimum"):
-        comp = customer_fixed_charges.get(key)
-        if not isinstance(comp, dict):
-            continue
-        if "amount" not in comp:
-            continue
-        try:
-            amt = float(comp["amount"])
-        except (TypeError, ValueError) as e:
-            raise ValueError(
-                f"customer_fixed_charges[{key!r}]: invalid amount {comp.get('amount')!r}"
-            ) from e
-        if amt == 0.0:
-            continue
-        units = comp.get("units")
-        if units is None or str(units).strip() == "":
-            raise ValueError(
-                f"customer_fixed_charges[{key!r}]: non-zero amount requires non-empty 'units' (got {units!r})"
-            )
-        out += _component_usd(amt, str(units), distinct_dates)
-    return out
+    comp = customer_fixed_charges.get("first_meter")
+    if not isinstance(comp, dict) or "amount" not in comp:
+        return 0.0
+    try:
+        amt = float(comp["amount"])
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"customer_fixed_charges['first_meter']: invalid amount {comp.get('amount')!r}"
+        ) from e
+    if amt == 0.0:
+        return 0.0
+    units = comp.get("units")
+    if units is None or str(units).strip() == "":
+        raise ValueError(
+            f"customer_fixed_charges['first_meter']: non-zero amount requires non-empty 'units' (got {units!r})"
+        )
+    return _component_usd(amt, str(units), distinct_dates)

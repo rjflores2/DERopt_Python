@@ -255,6 +255,33 @@ def register(
     )
 
 
+def collect_equipment_cost_diagnostics(
+    model: Any,
+    _data: Any,
+    _case_cfg: Any,
+) -> list[str]:
+    """Diagnostics hook: warn on negative or all-zero capital / O&M per solar profile (see ``TECH_DIAGNOSTICS``)."""
+    if not hasattr(model, "solar_pv"):
+        return []
+    from technologies.equipment_cost_diagnostics import equipment_capital_om_warnings
+
+    blk = model.solar_pv
+    out: list[str] = []
+    for p in blk.SOLAR:
+        cap = float(pyo.value(blk.capital_cost_per_kw[p]))
+        om = float(pyo.value(blk.om_per_kw_year[p]))
+        out.extend(
+            equipment_capital_om_warnings(
+                f"Solar profile {str(p)!r}",
+                cap,
+                om,
+                capital_name="capital_cost_per_kw",
+                om_name="om_per_kw_year",
+            )
+        )
+    return out
+
+
 # -----------------------------------------------------------------------------
 # Plumbing (helpers used by add_solar_pv_block)
 # -----------------------------------------------------------------------------

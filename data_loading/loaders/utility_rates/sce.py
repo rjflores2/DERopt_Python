@@ -73,38 +73,40 @@ def _parse_schedule(
 
 
 def _extract_customer_fixed_charges(item: dict) -> dict[str, Any] | None:
-    """Map OpenEI customer / meter fixed charges into ``ParsedRate.customer_fixed_charges``.
+    """True fixed charges only: ``fixedchargefirstmeter`` / ``fixedchargeunits`` (daily or monthly).
 
-    Reads ``fixedchargefirstmeter``, ``fixedchargeunits``, and when present ``mincharge``,
-    ``minchargeunits``. Amounts are coerced to float; units are kept as strings (e.g. ``$/day``).
+    Minimum bill fields are separate — see ``_extract_minimum_meter_charge``.
     """
-    out: dict[str, Any] = {}
-
     fcm = item.get("fixedchargefirstmeter")
-    if fcm is not None:
-        try:
-            amt = float(fcm)
-        except (TypeError, ValueError):
-            amt = 0.0
-        units = item.get("fixedchargeunits")
-        out["first_meter"] = {
+    if fcm is None:
+        return None
+    try:
+        amt = float(fcm)
+    except (TypeError, ValueError):
+        amt = 0.0
+    units = item.get("fixedchargeunits")
+    return {
+        "first_meter": {
             "amount": amt,
             "units": str(units) if units is not None else "",
         }
+    }
 
+
+def _extract_minimum_meter_charge(item: dict) -> dict[str, Any] | None:
+    """URDB ``mincharge`` / ``minchargeunits`` for reporting only (not summed into fixed horizon USD)."""
     mc = item.get("mincharge")
-    if mc is not None:
-        try:
-            mam = float(mc)
-        except (TypeError, ValueError):
-            mam = 0.0
-        mu = item.get("minchargeunits")
-        out["minimum"] = {
-            "amount": mam,
-            "units": str(mu) if mu is not None else "",
-        }
-
-    return out if out else None
+    if mc is None:
+        return None
+    try:
+        mam = float(mc)
+    except (TypeError, ValueError):
+        mam = 0.0
+    mu = item.get("minchargeunits")
+    return {
+        "amount": mam,
+        "units": str(mu) if mu is not None else "",
+    }
 
 
 def _extract_demand_charges(item: dict) -> dict | None:
@@ -222,6 +224,7 @@ def load_sce_rate(item: dict) -> ParsedRate:
             },
             demand_charges=_extract_demand_charges(item),
             customer_fixed_charges=_extract_customer_fixed_charges(item),
+            minimum_meter_charge=_extract_minimum_meter_charge(item),
         )
     else:
         # TOU: one rate per tier; weekday and weekend schedules can differ.
@@ -243,4 +246,5 @@ def load_sce_rate(item: dict) -> ParsedRate:
             },
             demand_charges=_extract_demand_charges(item),
             customer_fixed_charges=_extract_customer_fixed_charges(item),
+            minimum_meter_charge=_extract_minimum_meter_charge(item),
         )
