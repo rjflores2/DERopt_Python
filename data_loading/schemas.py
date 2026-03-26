@@ -19,6 +19,11 @@ class DataContainer:
     # Utility: single import price vector and optional rate metadata (demand charges, etc.)
     import_prices: list[float] | None = None
     utility_rate: Any = None
+    # Utility (optional per-node extension):
+    # node = customer/meter assumption for utility billing.
+    import_prices_by_node: dict[str, list[float]] | None = None
+    utility_rate_by_node: dict[str, Any] | None = None
+    node_utility_tariff_key: dict[str, str] | None = None
 
     def validate_minimum_fields(self) -> None:
         """Validate minimum fields required by early slices."""

@@ -16,8 +16,9 @@ def extract_solution(model: Any, data: Any) -> dict[str, Any]:
     """Extract solution from a solved model into a plain dict.
 
     Returns:
-        objective_value: float
-        cost_breakdown: dict with keys energy_import_cost, nonTOU_demand_charge_cost, TOU_demand_charge_cost
+        objective_value: float (optimization objective; decision-relevant costs only)
+        cost_breakdown: dict including optimizing_cost, fixed_non_optimizing_cost,
+            total_reported_cost, plus utility component slices when available
         timeseries: dict with per-timestep arrays (length = len(T)):
             grid_import_kwh, load_kwh, solar_kwh (if solar block present), import_price_per_kwh, datetime (if in data)
     """
@@ -39,6 +40,31 @@ def extract_solution(model: Any, data: Any) -> dict[str, Any]:
 
     if model.obj.is_constructed():
         out["objective_value"] = float(pyo.value(model.obj))
+        out["cost_breakdown"]["optimizing_cost"] = float(pyo.value(model.obj))
+    if hasattr(model, "total_cost_non_optimizing_annual"):
+        out["cost_breakdown"]["fixed_non_optimizing_cost"] = float(pyo.value(model.total_cost_non_optimizing_annual))
+    if (
+        "optimizing_cost" in out["cost_breakdown"]
+        and "fixed_non_optimizing_cost" in out["cost_breakdown"]
+    ):
+        out["cost_breakdown"]["total_reported_cost"] = (
+            out["cost_breakdown"]["optimizing_cost"]
+            + out["cost_breakdown"]["fixed_non_optimizing_cost"]
+        )
+
+    # Per-block cost slices for downstream decomposition/reporting.
+    non_opt_components: dict[str, float] = {}
+    optimizing_components: dict[str, float] = {}
+    for blk in model.component_objects(pyo.Block, descend_into=False):
+        name = str(blk.name)
+        if hasattr(blk, "cost_non_optimizing_annual"):
+            non_opt_components[name] = float(pyo.value(blk.cost_non_optimizing_annual))
+        if hasattr(blk, "objective_contribution"):
+            optimizing_components[name] = float(pyo.value(blk.objective_contribution))
+    if non_opt_components:
+        out["cost_breakdown"]["non_optimizing_components"] = non_opt_components
+    if optimizing_components:
+        out["cost_breakdown"]["optimizing_components"] = optimizing_components
 
     # Utility block: cost components and grid_import
     if hasattr(model, "utility"):
@@ -55,7 +81,13 @@ def extract_solution(model: Any, data: Any) -> dict[str, Any]:
                     float(pyo.value(ub.grid_import[n, t])) for n in NODES
                 )
         if hasattr(ub, "import_price"):
-            out["timeseries"]["import_price_per_kwh"] = [float(pyo.value(ub.import_price[t])) for t in T]
+            try:
+                out["timeseries"]["import_price_per_kwh"] = [
+                    float(sum(pyo.value(ub.import_price[n, t]) for n in NODES) / max(1, len(NODES)))
+                    for t in T
+                ]
+            except Exception:
+                out["timeseries"]["import_price_per_kwh"] = [float(pyo.value(ub.import_price[t])) for t in T]
 
     # Load from model param
     if hasattr(model, "electricity_load"):
@@ -89,7 +121,7 @@ def print_solution_summary(extracted: dict[str, Any]) -> None:
     """Print a short summary of the solution to the terminal."""
     obj = extracted.get("objective_value")
     if obj is not None:
-        print(f"  Objective (total cost): {obj:,.2f}")
+        print(f"  Objective (decision-relevant cost): {obj:,.2f}")
     cb = extracted.get("cost_breakdown") or {}
     if cb:
         print("  Cost breakdown:")

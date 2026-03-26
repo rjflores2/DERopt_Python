@@ -77,6 +77,42 @@ def _utility_block_present(model: Any) -> bool:
     return getattr(model, "utility", None) is not None
 
 
+def _nodes(model: Any, data: Any) -> list[str]:
+    if getattr(model, "NODES", None) is not None:
+        return list(model.NODES)
+    return list((getattr(data, "static", {}) or {}).get("electricity_load_keys") or [])
+
+
+def _import_prices_by_node(model: Any, data: Any) -> dict[str, list[float]]:
+    nodes = _nodes(model, data)
+    out: dict[str, list[float]] = {}
+    by_node = getattr(data, "import_prices_by_node", None)
+    if isinstance(by_node, dict):
+        for n in nodes:
+            vals = by_node.get(n)
+            out[n] = [float(v) for v in (vals or [])]
+        return out
+    ip = getattr(data, "import_prices", None) or []
+    shared = [float(v) for v in ip]
+    for n in nodes:
+        out[n] = shared
+    return out
+
+
+def _utility_rates_by_node(model: Any, data: Any) -> dict[str, Any | None]:
+    nodes = _nodes(model, data)
+    out: dict[str, Any | None] = {}
+    by_node = getattr(data, "utility_rate_by_node", None)
+    if isinstance(by_node, dict):
+        for n in nodes:
+            out[n] = by_node.get(n)
+        return out
+    ur = getattr(data, "utility_rate", None)
+    for n in nodes:
+        out[n] = ur
+    return out
+
+
 def _check_horizon(data: Any) -> list[str]:
     out: list[str] = []
     static = getattr(data, "static", None) or {}
@@ -93,51 +129,159 @@ def _check_horizon(data: Any) -> list[str]:
     return out
 
 
-def _check_free_grid(model: Any, data: Any) -> list[str]:
+def _rate_from_urdb_structure(struct: Any) -> float:
+    """Best-effort extract of ``rate`` from OpenEI/URDB (possibly nested) structures."""
+    if struct is None:
+        return 0.0
+    if isinstance(struct, dict):
+        return float(struct.get("rate", 0) or 0.0)
+    if isinstance(struct, list) and struct:
+        return _rate_from_urdb_structure(struct[0])
+    return 0.0
+
+
+def _extract_applicable_utility_demand_charge_rates_by_node(model: Any, data: Any) -> dict[str, list[float]]:
+    """
+    Extract demand-charge $/kW rates that correspond to demand-charge *decision variables*
+    created in ``model.utility``.
+
+    This avoids needing to re-implement month/tier applicability logic in diagnostics: if the
+    model created ``P_flat_y{year}_m{month}`` / ``P_tou_y{year}_m{month}_tier{tier}`` (or legacy
+    ``P_flat_m{month}`` / ``P_tou_m{month}_tier{tier}``), those are the applicable rates for this
+    run/horizon.
+    """
+    nodes = _nodes(model, data)
+    out: dict[str, list[float]] = {n: [] for n in nodes}
     if not _utility_block_present(model):
+        return out
+
+    rates_by_node = _utility_rates_by_node(model, data)
+    dts = (getattr(data, "timeseries", {}) or {}).get("datetime") or []
+    for n in nodes:
+        ur = rates_by_node.get(n)
+        dc = getattr(ur, "demand_charges", None) if ur is not None else None
+        if not dc:
+            continue
+        dtype = dc.get("demand_charge_type")
+        if dtype in ("flat", "both"):
+            applicable = set(dc.get("flat_demand_charge_applicable_months") or [])
+            flat_struct = dc.get("flat_demand_charge_structure") or []
+            flat_month_map = dc.get("flat_demand_charge_months") or []
+            months = sorted({dt.month - 1 for dt in dts if dt is not None})
+            for mi in months:
+                if applicable and mi not in applicable:
+                    continue
+                struct_idx = 0
+                if mi < len(flat_month_map) and flat_month_map[mi] is not None:
+                    try:
+                        struct_idx = int(flat_month_map[mi])
+                    except (TypeError, ValueError):
+                        struct_idx = 0
+                if 0 <= struct_idx < len(flat_struct):
+                    out[n].append(_rate_from_urdb_structure(flat_struct[struct_idx]))
+        if dtype in ("tou", "both"):
+            drs = dc.get("demand_charge_ratestructure") or []
+            for tier in drs:
+                out[n].append(_rate_from_urdb_structure(tier))
+    return out
+
+
+def _check_utility_free_grid_zero_or_missing_costs(model: Any, data: Any) -> list[str]:
+    """
+    Warn if decision variables exist but the decision-dependent *marginal* utility cost signal
+    is effectively zero (energy import prices and demand-charge rates are all ~0).
+    """
+    if not _utility_block_present(model) or not hasattr(model.utility, "grid_import"):
         return []
-    if _has_nonzero_marginal_energy_prices(data):
+
+    prices_by_node = _import_prices_by_node(model, data)
+    rates_by_node = _extract_applicable_utility_demand_charge_rates_by_node(model, data)
+    free_nodes: list[str] = []
+    for n in _nodes(model, data):
+        e_vals = prices_by_node.get(n, [])
+        energy_has_positive = any(v > _FLOAT_TOL for v in e_vals)
+        d_vals = rates_by_node.get(n, [])
+        demand_has_positive = any(v > _FLOAT_TOL for v in d_vals)
+        if not energy_has_positive and not demand_has_positive:
+            free_nodes.append(n)
+    if free_nodes:
+        listed = ", ".join(sorted(free_nodes)[:5])
+        suffix = "" if len(free_nodes) <= 5 else f" (+{len(free_nodes)-5} more)"
+        return [
+            "Warning: utility grid-import decision variables exist, but no positive energy or "
+            "demand-charge cost was found. Grid imports may be free in the optimization. "
+            f"Affected nodes: {listed}{suffix}."
+        ]
+    return []
+
+
+def _check_negative_utility_energy_prices(data: Any) -> list[str]:
+    # model is not available here, so infer nodes directly from data.
+    nodes = list((getattr(data, "static", {}) or {}).get("electricity_load_keys") or [])
+    by_node = getattr(data, "import_prices_by_node", None)
+    vals_by_node: dict[str, list[float]] = {}
+    if isinstance(by_node, dict):
+        vals_by_node = {n: [float(v) for v in (by_node.get(n) or [])] for n in nodes}
+    else:
+        ip = getattr(data, "import_prices", None)
+        if not ip:
+            return []
+        shared = [float(v) for v in ip]
+        vals_by_node = {n: shared for n in nodes}
+        if not nodes:
+            vals_by_node = {"_all": shared}
+    neg_nodes = [n for n, vals in vals_by_node.items() if any(v < -_FLOAT_TOL for v in vals)]
+    if not neg_nodes:
         return []
-    ur = getattr(data, "utility_rate", None)
-    dc = getattr(ur, "demand_charges", None) if ur is not None else None
-    if _demand_charge_has_nonzero_rates(dc):
-        return []
+    neg = [v for vals in vals_by_node.values() for v in vals if v < -_FLOAT_TOL]
+    listed = ", ".join(sorted(neg_nodes)[:5])
+    suffix = "" if len(neg_nodes) <= 5 else f" (+{len(neg_nodes)-5} more)"
     return [
-        "Utility block is present but energy import prices are all zero (or missing) and there are "
-        "no non-zero demand-charge rates: grid energy may be effectively free after any fixed fees. "
-        "This may be intentional for debugging, or it may indicate missing tariff inputs."
+        "Warning: negative utility energy prices detected "
+        f"(min = {min(neg):.6g} $/kWh); grid imports may be rewarded in some periods. "
+        f"Affected nodes: {listed}{suffix}."
     ]
 
 
-def _check_fixed_charge_only_utility(model: Any, data: Any) -> list[str]:
-    if not _utility_block_present(model):
+def _check_zero_demand_charge_rates(model: Any, data: Any) -> list[str]:
+    rates_by_node = _extract_applicable_utility_demand_charge_rates_by_node(model, data)
+    zero_nodes = [
+        n for n, vals in rates_by_node.items()
+        if vals and all(abs(v) <= _FLOAT_TOL for v in vals)
+    ]
+    if not zero_nodes:
         return []
-    ur = getattr(data, "utility_rate", None)
-    if ur is None:
-        return []
-    fc = getattr(ur, "customer_fixed_charges", None)
-    if not fc:
-        return []
-    if _has_nonzero_marginal_energy_prices(data):
-        return []
-    dc = getattr(ur, "demand_charges", None)
-    if _demand_charge_has_nonzero_rates(dc):
-        return []
+    listed = ", ".join(sorted(zero_nodes)[:5])
+    suffix = "" if len(zero_nodes) <= 5 else f" (+{len(zero_nodes)-5} more)"
     return [
-        "Utility has customer_fixed_charges but no energy prices and no demand charges: "
-        "utility cost in the objective is constant and grid imports have zero marginal cost."
+        "Warning: demand-charge variables exist, but all applicable demand-charge rates are zero. "
+        f"Peak imports may not be penalized. Affected nodes: {listed}{suffix}."
+    ]
+
+
+def _check_negative_demand_charge_rates(model: Any, data: Any) -> list[str]:
+    rates_by_node = _extract_applicable_utility_demand_charge_rates_by_node(model, data)
+    neg_nodes: list[str] = []
+    neg_rates: list[float] = []
+    for n, vals in rates_by_node.items():
+        nneg = [v for v in vals if v < -_FLOAT_TOL]
+        if nneg:
+            neg_nodes.append(n)
+            neg_rates.extend(nneg)
+    if not neg_nodes:
+        return []
+    listed = ", ".join(sorted(neg_nodes)[:5])
+    suffix = "" if len(neg_nodes) <= 5 else f" (+{len(neg_nodes)-5} more)"
+    return [
+        "Warning: negative demand-charge rates detected "
+        f"(min = {min(neg_rates):.6g} $/kW); peak imports may be rewarded or under-penalized. "
+        f"Affected nodes: {listed}{suffix}."
     ]
 
 
 def _check_negative_import_prices(data: Any) -> list[str]:
-    ip = getattr(data, "import_prices", None)
-    if not ip:
-        return []
-    vals = [float(p) for p in ip]
-    neg = [p for p in vals if p < -_FLOAT_TOL]
-    if not neg:
-        return []
-    return [f"import_prices contains negative values (min = {min(neg):.6g} $/kWh)."]
+    # Backward-compatible alias: earlier tests look for "-0.02" and "negative" substrings.
+    return _check_negative_utility_energy_prices(data)
 
 
 def _iter_technology_diagnostic_collectors():
@@ -166,9 +310,13 @@ def _collect_technology_diagnostics(model: Any, data: Any, case_cfg: Any) -> lis
 
 
 def _check_demand_subhourly(model: Any, data: Any) -> list[str]:
-    ur = getattr(data, "utility_rate", None)
-    dc = getattr(ur, "demand_charges", None) if ur is not None else None
-    if not _demand_charge_has_nonzero_rates(dc):
+    rates_by_node = _utility_rates_by_node(model, data)
+    active_nodes = []
+    for n, ur in rates_by_node.items():
+        dc = getattr(ur, "demand_charges", None) if ur is not None else None
+        if _demand_charge_has_nonzero_rates(dc):
+            active_nodes.append(n)
+    if not active_nodes:
         return []
     static = getattr(data, "static", None) or {}
     dt = static.get("time_step_hours")
@@ -178,9 +326,12 @@ def _check_demand_subhourly(model: Any, data: Any) -> list[str]:
         h = 1.0
     if abs(h - 1.0) <= 1e-6:
         return []
+    listed = ", ".join(sorted(active_nodes)[:5])
+    suffix = "" if len(active_nodes) <= 5 else f" (+{len(active_nodes)-5} more)"
     return [
         f"Demand charges are active but time_step_hours is {h:g} (not 1.0): demand-charge treatment "
-        "may be incorrect for subhourly runs because import decision variables are in energy units (kWh per period)."
+        "may be incorrect for subhourly runs because import decision variables are in energy units (kWh per period). "
+        f"Affected nodes: {listed}{suffix}."
     ]
 
 
@@ -193,11 +344,12 @@ def collect_model_diagnostics(
     warnings: list[str] = []
     # Order matches documented check categories (horizon, grid/tariff, assets, demand coupling).
     warnings.extend(_check_horizon(data))
-    warnings.extend(_check_free_grid(model, data))
-    warnings.extend(_check_negative_import_prices(data))
+    warnings.extend(_check_negative_demand_charge_rates(model, data))
+    warnings.extend(_check_zero_demand_charge_rates(model, data))
+    warnings.extend(_check_negative_import_prices(data))  # energy-side
+    warnings.extend(_check_utility_free_grid_zero_or_missing_costs(model, data))
     warnings.extend(_collect_technology_diagnostics(model, data, case_cfg))
     warnings.extend(_check_demand_subhourly(model, data))
-    warnings.extend(_check_fixed_charge_only_utility(model, data))
     for fn in _extra_checks:
         warnings.extend(fn(model, data, case_cfg))
     return warnings

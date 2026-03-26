@@ -182,17 +182,15 @@ def add_solar_pv_block(
                     b.AREA_LIMIT_INDEX, rule=capacity_area_cap_rule
                 )
 
-            # Objective: annualized capital on adopted kW; O&M on existing and adopted solar;
-            # optional capital recovery on existing kW only if this is considered by the user 
+            # Objective: decision-relevant terms only (adopted capacity and adopted O&M).
             b.objective_contribution = sum(
                 b.capital_cost_per_kw[p] * b.solar_capacity_adopted[n, p] * r.amortization_factor
-                + b.om_per_kw_year[p] * (b.existing_solar_capacity[n, p] + b.solar_capacity_adopted[n, p])
-                + r.existing_cap_recovery_per_kw[i] * b.existing_solar_capacity[n, p]
+                + b.om_per_kw_year[p] * b.solar_capacity_adopted[n, p]
                 for i, p in enumerate(b.SOLAR)
                 for n in NODES
             )
-            # Slice of annual cost attributable to existing assets (for reporting).
-            b.cost_existing_annual = pyo.Expression(
+            # Reporting-only existing/background annual costs.
+            b.cost_non_optimizing_annual = pyo.Expression(
                 expr=sum(
                     b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
                     + r.existing_cap_recovery_per_kw[i] * b.existing_solar_capacity[n, p]
@@ -208,13 +206,9 @@ def add_solar_pv_block(
                 )
             b.generation_limits = pyo.Constraint(NODES, b.SOLAR, T, rule=generation_limits_rule_existing_only)
 
-            b.objective_contribution = sum(
-                b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
-                + r.existing_cap_recovery_per_kw[i] * b.existing_solar_capacity[n, p]
-                for i, p in enumerate(b.SOLAR)
-                for n in NODES
-            )
-            b.cost_existing_annual = pyo.Expression(
+            # No decision-dependent cost in existing-only mode.
+            b.objective_contribution = pyo.Expression(expr=0.0)
+            b.cost_non_optimizing_annual = pyo.Expression(
                 expr=sum(
                     b.om_per_kw_year[p] * b.existing_solar_capacity[n, p]
                     + r.existing_cap_recovery_per_kw[i] * b.existing_solar_capacity[n, p]

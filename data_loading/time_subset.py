@@ -77,6 +77,12 @@ def apply_time_subset(data: DataContainer, cfg: TimeSubsetConfig) -> DataContain
     # Slice import_prices too; getattr avoids AttributeError if container doesn't have the attribute (e.g. in tests).
     if getattr(data, "import_prices", None) is not None and len(data.import_prices) == original_len:
         data.import_prices = [data.import_prices[i] for i in keep_idx]
+    # Slice node-scoped import prices too.
+    ip_by_node = getattr(data, "import_prices_by_node", None)
+    if isinstance(ip_by_node, dict):
+        for n, vals in list(ip_by_node.items()):
+            if isinstance(vals, list) and len(vals) == original_len:
+                ip_by_node[n] = [vals[i] for i in keep_idx]
 
     data.indices["time"] = list(range(len(keep_idx)))
     data.static["time_subset_applied"] = {

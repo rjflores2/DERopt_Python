@@ -1,6 +1,6 @@
 """Electricity import/export utility block.
 
-Provides grid import variable, energy cost from import_prices, and demand charges from
+Provides grid import variable, node-specific energy cost, and node-specific demand charges from
 ParsedRate.demand_charges (flat and TOU). This is the generic grid/utility block; utility-specific
 loaders normalize their tariffs into ParsedRate so this block does not branch on utility names.
 
@@ -9,6 +9,7 @@ Layout: ``_add_utility_block`` (main Pyomo builder) first, then small helpers, t
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pyomo.environ as pyo
@@ -17,32 +18,20 @@ from data_loading.loaders.utility_rates.customer_charge_horizon import (
     fixed_customer_charges_horizon_usd,
 )
 
-def _rate_from_urdb_structure(struct: Any) -> float:
-    """Best-effort extract of ``rate`` from OpenEI/URDB (possibly nested) structures.
-
-    Common shapes:
-    - [[{"rate": 12.3}]]  (tiered lists)
-    - [{"rate": 12.3}]
-    - {"rate": 12.3}
-    """
-    if struct is None:
-        return 0.0
-    if isinstance(struct, dict):
-        return float(struct.get("rate", 0) or 0.0)
-    if isinstance(struct, list) and struct:
-        first = struct[0]
-        return _rate_from_urdb_structure(first)
-    return 0.0
-
 
 def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
     """
     Build and attach the grid / utility import block when energy prices, demand charges,
     and/or fixed customer charges apply; otherwise return ``None``.
 
+    Assumption used in this layer: each ``node`` represents one customer/meter for utility billing.
+    Under this assumption, energy prices, demand charges, and fixed customer charges are applied per node.
+
     1. Data and other inputs
-       - ``model.import_prices``                    -> optional length-|T| import price vector ($/kWh); if absent and the block is still built, prices default to 0
-       - ``model.utility_rate``                     -> optional parsed tariff object; may provide ``demand_charges`` and ``customer_fixed_charges``
+       - ``model.import_prices_by_node``            -> optional per-node import price vectors ($/kWh); preferred path
+       - ``model.utility_rate_by_node``             -> optional per-node parsed tariff objects; preferred path
+       - ``model.import_prices``                    -> optional legacy single length-|T| import price vector ($/kWh)
+       - ``model.utility_rate``                     -> optional legacy single parsed tariff object
        - ``data.static["time_step_hours"]``         -> required when any demand charges are active (used to convert kWh/period to kW)
        - ``data.timeseries["datetime"]``            -> required when any demand charges are active (used to map timesteps into bill months and TOU tiers); also used to prorate fixed customer charges across the represented horizon
 
@@ -52,38 +41,70 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
 
     3. Variables (Pyomo ``Var``)
        - ``grid_import[node, t]``                   -> grid energy imported at each node and time period (kWh/period)
-       - ``P_flat_m{month}``                        -> flat-demand peak proxy for an applicable bill month; only created when flat demand charges are active
-       - ``P_tou_m{month}_tier{tier}``              -> TOU demand peak proxy (kW) for a particular (bill month, TOU demand tier); only created when that tier actually occurs in that month over the modeled horizon
+       - ``P_flat_y{year}_m{month}``                -> flat-demand peak proxy for an applicable (year, month); indexed by nodes with flat demand charges
+       - ``P_tou_y{year}_m{month}_tier{tier}``      -> TOU demand peak proxy (kW) for a particular (year, month, TOU tier); indexed by nodes with TOU demand charges
 
     4. Parameters and Expressions
-       - ``import_price[t]``                        -> import price ($/kWh) for each time period
+       - ``import_price[node, t]``                  -> node-specific import price ($/kWh) for each time period
        - ``grid_import_power_kw[node, t]``          -> grid import power proxy used only for demand charges: ``grid_import / time_step_hours`` (kW)
 
     5. Contribution to electricity sources - ``electricity_source_term[node, t]``
        - ``grid_import[node, t]``                   -> utility block source-side contribution to the electricity balance in ``model.core``
 
     6. Contribution to the cost function - ``objective_contribution``
-       - ``energy_import_cost``                     -> energy-import cost from ``import_price[t] * grid_import[node, t]``
+       - ``energy_import_cost``                     -> energy-import cost from ``import_price[node,t] * grid_import[node, t]``
        - ``nonTOU_Demand_Charge_Cost``              -> flat demand-charge cost when ``demand_charge_type`` includes flat / both
        - ``TOU_Demand_Charge_Cost``                 -> TOU demand-charge cost when ``demand_charge_type`` includes tou / both
        - ``fixed_usd``                              -> fixed customer-charge USD over the represented horizon from ``fixed_customer_charges_horizon_usd``
 
-    7. Contribution to reporting - ``cost_existing_annual``
-       - fixed customer-charge portion only; this is the usage-independent utility-fee term
+    7. Contribution to reporting - ``cost_non_optimizing_annual``
+       - fixed customer-charge portion only; this is the usage-independent utility-fee term billed per node
 
     8. Constraints
 
        - ``flat_demand_charge_ub_m*_t*``           -> monthly: ``P_flat_m >= sum_n grid_import_power_kw[n,t]`` for all timesteps in month
        - ``tou_demand_charge_ub_m*_tier*_t*``      -> monthly-by-tier: ``P_tou_m{m}_tier{tier} >= sum_n grid_import_power_kw[n,t]`` for all timesteps in month mapped to that TOU tier
     """
-    import_prices = getattr(model, "import_prices", None) # Pulls utility rate info that was attached to model.core
+    import_prices = getattr(model, "import_prices", None)
     utility_rate = getattr(model, "utility_rate", None)
-    demand_charges = getattr(utility_rate, "demand_charges", None) if utility_rate is not None else None
+    import_prices_by_node = getattr(model, "import_prices_by_node", None)
+    utility_rate_by_node = getattr(model, "utility_rate_by_node", None)
 
-    # Time-step-dependent components require an explicit time step. For example, demand charges
-    # are intended to proxy peak kW, but this model's grid_import decision variables are in kWh
-    # per period; without time_step_hours we cannot interpret kWh/period as kW.
-    if demand_charges and demand_charges.get("demand_charge_type"):
+    T = model.T
+    NODES = list(model.NODES)
+    _T = list(T)
+    datetimes = data.timeseries.get("datetime")
+    if datetimes is None or len(datetimes) != len(_T):
+        datetimes = [None] * len(_T)
+
+    # Resolve node-scoped utility inputs (preferred); fall back to legacy single-tariff fields.
+    prices_by_node: dict[str, list[float]] = {}
+    rates_by_node: dict[str, Any | None] = {}
+    for n in NODES:
+        p = None
+        if isinstance(import_prices_by_node, dict):
+            p = import_prices_by_node.get(n)
+        if p is None and import_prices is not None:
+            p = import_prices
+        prices_by_node[n] = list(p) if p is not None else [0.0] * len(_T)
+
+        r = None
+        if isinstance(utility_rate_by_node, dict):
+            r = utility_rate_by_node.get(n)
+        if r is None:
+            r = utility_rate
+        rates_by_node[n] = r
+
+    def _demand_type_for_node(node: str) -> str | None:
+        dc = getattr(rates_by_node[node], "demand_charges", None) if rates_by_node[node] is not None else None
+        dtp = dc.get("demand_charge_type") if isinstance(dc, dict) else None
+        if dtp in ("flat", "tou", "both"):
+            return dtp
+        return None
+
+    has_any_demand = any(_demand_type_for_node(n) is not None for n in NODES)
+    # Time-step-dependent components require explicit time_step_hours.
+    if has_any_demand:
         dt_hours = (getattr(data, "static", {}) or {}).get("time_step_hours")
         if dt_hours is None:
             raise ValueError(
@@ -102,144 +123,174 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
                 "Demand charges are present but data.static['time_step_hours'] must be > 0 "
                 f"(got {dt_hours_f!r})."
             )
-
-    T = model.T # time index from model.core
-    NODES = list(model.NODES) # node index from model.core
-    _T = list(T) # turning T from model.core into a list - the python list is more straightforward to use for indexing
-    datetimes = data.timeseries.get("datetime") # pulls the datetime index from the data container
-    if datetimes is None or len(datetimes) != len(_T):
-        datetimes = [None] * len(_T) # if the datetime index is not present, we default to None for all time periods
-    if demand_charges and demand_charges.get("demand_charge_type"):
         if any(dt is None for dt in datetimes):
             raise ValueError(
                 "Demand charges are present but data.timeseries['datetime'] is missing or misaligned with the run horizon. "
                 "Demand-charge month/tier mapping requires one valid datetime per period."
             )
+    else:
+        dt_hours_f = 1.0
 
-    fc = getattr(utility_rate, "customer_fixed_charges", None) if utility_rate is not None else None
-    fixed_usd = fixed_customer_charges_horizon_usd(fc, datetimes)
+    # Fixed customer charges are reporting-only and billed per node (node=customer assumption).
+    fixed_usd = sum(
+        fixed_customer_charges_horizon_usd(
+            getattr(rates_by_node[n], "customer_fixed_charges", None) if rates_by_node[n] is not None else None,
+            datetimes,
+        )
+        for n in NODES
+    )
 
-    has_energy_or_demand = import_prices is not None or (
-        demand_charges and demand_charges.get("demand_charge_type")
+    has_energy_or_demand = (
+        import_prices is not None
+        or isinstance(import_prices_by_node, dict)
+        or has_any_demand
     )
     if not has_energy_or_demand and fixed_usd == 0:
         return None
 
-    # If no energy prices but we have demand charges or fixed charges, use zero energy cost per period.
-    prices = list(import_prices) if import_prices is not None else [0.0] * len(_T)
+    def _tok(x: str) -> str:
+        return re.sub(r"[^0-9A-Za-z_]+", "_", x)
 
-    def block_rule(b):
-        b.grid_import = pyo.Var(NODES, T, within=pyo.NonNegativeReals)
+    def block_rule(b): #Pyomo block 
+        b.grid_import = pyo.Var(NODES, T, within=pyo.NonNegativeReals) # Grid import variable (kWh/period)
         # Power proxy for demand charges: kWh/period ÷ (h/period) = kW.
-        if demand_charges and demand_charges.get("demand_charge_type"):
-            b.grid_import_power_kw = pyo.Expression(
+        if has_any_demand:
+            b.grid_import_power_kw = pyo.Expression( # Power proxy for demand charges: kWh/period ÷ (h/period) = kW.
                 NODES,
                 T,
                 rule=lambda m, n, t: m.grid_import[n, t] / dt_hours_f,
             )
-        b.electricity_source_term = pyo.Expression(
+        b.electricity_source_term = pyo.Expression( # Contribution to electricity sources - ``electricity_source_term[node, t]``
             NODES, T,
             rule=lambda m, n, t: m.grid_import[n, t],
         )
-        b.import_price = pyo.Param(T, initialize={t: prices[t] for t in T}, within=pyo.Reals, mutable=True)
-        # Energy import cost: $/kWh * kWh = $ per period; sum over t and nodes.
-        b.energy_import_cost = sum(
-            b.import_price[t] * sum(b.grid_import[n, t] for n in NODES)
-            for t in T
+        b.import_price = pyo.Param(
+            NODES,
+            T,
+            initialize={(n, t): float(prices_by_node[n][t]) for n in NODES for t in T},
+            within=pyo.Reals,
+            mutable=True,
         )
+        # Energy import cost: node-specific $/kWh * kWh = $ per period.
+        b.energy_import_cost = sum(b.import_price[n, t] * b.grid_import[n, t] for n in NODES for t in T)
         flat_demand_charge_terms = []
         tou_demand_charge_terms = []
 
-        if demand_charges:
-            # Flat demand charge: one peak variable per applicable month; P >= sum_n grid_import[n,t] for t in month.
-            if demand_charges.get("demand_charge_type") in ("flat", "both"):
-                # Only create month variables for months that actually appear in the horizon.
-                months_in_run = sorted({dt.month - 1 for dt in datetimes if dt is not None})
-                applicable = set(demand_charges.get("flat_demand_charge_applicable_months") or [])
-                flat_struct = demand_charges.get("flat_demand_charge_structure") or [[]]
-                flat_month_map = demand_charges.get("flat_demand_charge_months") or []
-                for mi in months_in_run:
-                    if applicable and mi not in applicable:
-                        continue
-                    times_in_month = [
-                        t for t in _T
-                        if t < len(datetimes)
-                        and datetimes[t] is not None
-                        and datetimes[t].month - 1 == mi
-                    ]
-                    if not times_in_month:
-                        continue
-                    # URDB/OpenEI often uses flatdemandmonths to map each month -> a structure index
-                    # (e.g. winter=0, summer=1) rather than providing 12 separate structures.
-                    struct_idx = 0
-                    if mi < len(flat_month_map):
-                        try:
-                            struct_idx = int(flat_month_map[mi])
-                        except (TypeError, ValueError) as e:
-                            raise ValueError(
-                                f"flat_demand_charge_months[{mi}] must be an int structure index; got {flat_month_map[mi]!r}"
-                            ) from e
-                    if not isinstance(flat_struct, list) or not flat_struct:
-                        raise ValueError("flat_demand_charge_structure must be a non-empty list")
-                    if struct_idx < 0 or struct_idx >= len(flat_struct):
+        # Create one set of demand-charge peak constraints per year-month occurrence.
+        year_months_in_run = sorted({(dt.year, dt.month - 1) for dt in datetimes if dt is not None})
+
+        # Flat demand charge: per-node, only for nodes whose tariff has flat (or both).
+        for yy, mi in year_months_in_run:
+            times_in_month = [t for t in _T if datetimes[t] is not None and datetimes[t].year == yy and datetimes[t].month - 1 == mi]
+            if not times_in_month:
+                continue
+            flat_nodes: list[str] = []
+            flat_rate_by_node: dict[str, float] = {}
+            for n in NODES:
+                ur_n = rates_by_node[n]
+                dc = getattr(ur_n, "demand_charges", None) if ur_n is not None else None
+                if not dc or dc.get("demand_charge_type") not in ("flat", "both"):
+                    continue
+                applicable = set(dc.get("flat_demand_charge_applicable_months") or [])
+                if applicable and mi not in applicable:
+                    continue
+                flat_struct = dc.get("flat_demand_charge_structure") or [[]]
+                flat_month_map = dc.get("flat_demand_charge_months") or []
+                struct_idx = 0
+                if mi < len(flat_month_map):
+                    try:
+                        struct_idx = int(flat_month_map[mi])
+                    except (TypeError, ValueError) as e:
                         raise ValueError(
-                            f"flat_demand_charge_months[{mi}] selects structure index {struct_idx} out of range "
-                            f"for flat_demand_charge_structure (len={len(flat_struct)})"
-                        )
-                    rate = _rate_from_urdb_structure(flat_struct[struct_idx])
-                    P_flat = pyo.Var(within=pyo.NonNegativeReals)
-                    b.add_component(f"P_flat_m{mi}", P_flat)
-                    for t in times_in_month:
-                        b.add_component(
-                            f"flat_demand_charge_ub_m{mi}_t{t}",
-                            pyo.Constraint(expr=P_flat >= sum(b.grid_import_power_kw[n, t] for n in NODES)),
-                        )
-                    flat_demand_charge_terms.append(rate * P_flat)
+                            f"Node {n!r}: flat_demand_charge_months[{mi}] must be an int structure index; got {flat_month_map[mi]!r}"
+                        ) from e
+                if not isinstance(flat_struct, list) or not flat_struct:
+                    raise ValueError(f"Node {n!r}: flat_demand_charge_structure must be a non-empty list")
+                if struct_idx < 0 or struct_idx >= len(flat_struct):
+                    raise ValueError(
+                        f"Node {n!r}: flat_demand_charge_months[{mi}] selects structure index {struct_idx} out of range "
+                        f"for flat_demand_charge_structure (len={len(flat_struct)})"
+                    )
+                flat_nodes.append(n)
+                flat_rate_by_node[n] = _rate_from_urdb_structure(flat_struct[struct_idx])
+            if flat_nodes:
+                P_flat = pyo.Var(flat_nodes, within=pyo.NonNegativeReals)
+                b.add_component(f"P_flat_y{yy}_m{mi}", P_flat)
+                for t in times_in_month:
+                    b.add_component(
+                        f"flat_demand_charge_ub_y{yy}_m{mi}_t{t}",
+                        pyo.Constraint(
+                            flat_nodes,
+                            rule=lambda _b, n, _t=t: P_flat[n] >= _b.grid_import_power_kw[n, _t],
+                        ),
+                    )
+                flat_demand_charge_terms.append(sum(flat_rate_by_node[n] * P_flat[n] for n in flat_nodes))
 
-            # TOU demand charge: one peak variable per (month, tier); P >= sum_n grid_import_power_kw[n,t] for t in that month mapped to tier.
-            if demand_charges.get("demand_charge_type") in ("tou", "both"):
-                drs = demand_charges.get("demand_charge_ratestructure") or []
-                # Map each timestep to (month, tier) using the existing OpenEI schedule fields.
-                times_by_month_tier: dict[tuple[int, int], list[int]] = {}
-                for t in _T:
-                    dt = datetimes[t]
-                    if dt is None:
-                        continue
-                    mi = dt.month - 1
-                    ti = _tier_for_tou_demand_charge(dt, demand_charges)
-                    times_by_month_tier.setdefault((mi, ti), []).append(t)
-
-                for (mi, ti), times in sorted(times_by_month_tier.items()):
-                    if not times:
-                        continue
+        # TOU demand charge: per-node, only for nodes whose tariff has tou (or both).
+        for yy, mi in year_months_in_run:
+            month_times = [t for t in _T if datetimes[t] is not None and datetimes[t].year == yy and datetimes[t].month - 1 == mi]
+            if not month_times:
+                continue
+            # Group node/timestep by TOU tier.
+            times_by_tier_node: dict[int, dict[str, list[int]]] = {}
+            rate_by_tier_node: dict[tuple[int, str], float] = {}
+            for n in NODES:
+                ur_n = rates_by_node[n]
+                dc = getattr(ur_n, "demand_charges", None) if ur_n is not None else None
+                if not dc or dc.get("demand_charge_type") not in ("tou", "both"):
+                    continue
+                drs = dc.get("demand_charge_ratestructure") or []
+                for t in month_times:
+                    ti = _tier_for_tou_demand_charge(datetimes[t], dc)
                     tier = drs[ti] if ti < len(drs) else {}
-                    rate = 0.0
-                    if isinstance(tier, list) and tier:
-                        rate = float(tier[0].get("rate", 0) if isinstance(tier[0], dict) else 0.0)
-                    elif isinstance(tier, dict):
-                        rate = float(tier.get("rate", 0) or 0.0)
-                    P_mt = pyo.Var(within=pyo.NonNegativeReals)
-                    b.add_component(f"P_tou_m{mi}_tier{ti}", P_mt)
-                    for t in times:
+                    rate_by_tier_node[(ti, n)] = _rate_from_urdb_structure(tier)
+                    times_by_tier_node.setdefault(ti, {}).setdefault(n, []).append(t)
+            for ti, by_node in sorted(times_by_tier_node.items()):
+                tier_nodes = sorted(by_node.keys())
+                if not tier_nodes:
+                    continue
+                P_tou = pyo.Var(tier_nodes, within=pyo.NonNegativeReals)
+                b.add_component(f"P_tou_y{yy}_m{mi}_tier{ti}", P_tou)
+                for n in tier_nodes:
+                    for t in by_node[n]:
                         b.add_component(
-                            f"tou_demand_charge_ub_m{mi}_tier{ti}_t{t}",
-                            pyo.Constraint(expr=P_mt >= sum(b.grid_import_power_kw[n, t] for n in NODES)),
+                            f"tou_demand_charge_ub_y{yy}_m{mi}_tier{ti}_n{_tok(n)}_t{t}",
+                            pyo.Constraint(expr=P_tou[n] >= b.grid_import_power_kw[n, t]),
                         )
-                    tou_demand_charge_terms.append(rate * P_mt)
+                tou_demand_charge_terms.append(sum(rate_by_tier_node[(ti, n)] * P_tou[n] for n in tier_nodes))
 
         # Expose demand-charge components separately for reporting; names match common rate language.
         b.nonTOU_Demand_Charge_Cost = pyo.Expression(expr=sum(flat_demand_charge_terms) if flat_demand_charge_terms else 0.0)
         b.TOU_Demand_Charge_Cost = pyo.Expression(expr=sum(tou_demand_charge_terms) if tou_demand_charge_terms else 0.0)
+        # Objective includes only decision-relevant utility costs.
         b.objective_contribution = (
             b.energy_import_cost
             + b.nonTOU_Demand_Charge_Cost
             + b.TOU_Demand_Charge_Cost
-            + fixed_usd
         )
-        b.cost_existing_annual = pyo.Expression(expr=fixed_usd)
+        # Reporting-only fixed utility customer charges (constant wrt decision variables).
+        b.cost_non_optimizing_annual = pyo.Expression(expr=fixed_usd)
 
     model.utility = pyo.Block(rule=block_rule)
     return model.utility
+
+
+def _rate_from_urdb_structure(struct: Any) -> float:
+    """Best-effort extract of ``rate`` from OpenEI/URDB (possibly nested) structures.
+
+    Common shapes:
+    - [[{"rate": 12.3}]]  (tiered lists)
+    - [{"rate": 12.3}]
+    - {"rate": 12.3}
+    """
+    if struct is None:
+        return 0.0
+    if isinstance(struct, dict):
+        return float(struct.get("rate", 0) or 0.0)
+    if isinstance(struct, list) and struct:
+        first = struct[0]
+        return _rate_from_urdb_structure(first)
+    return 0.0
 
 
 def _tier_for_tou_demand_charge(dt, demand_charges: dict) -> int:

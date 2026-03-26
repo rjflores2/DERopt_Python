@@ -81,7 +81,7 @@ def test_raw_energy_prices_override_openei_energy_keep_demand_charges(monkeypatc
     # End-to-end model path: mixed-source inputs should still build demand-charge components.
     m = build_model(data, technology_parameters={}, financials={})
     assert hasattr(m, "utility")
-    assert hasattr(m.utility, "P_flat_m0")
+    assert hasattr(m.utility, "P_flat_y2024_m0")
 
 
 def test_raw_prices_plus_demand_charges_without_datetime_fails_early(monkeypatch, tmp_path: Path):

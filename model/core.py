@@ -51,12 +51,29 @@ def build_model(
     # getattr: DataContainer may come from older code or tests that don't set these; avoid AttributeError.
     import_prices = getattr(data, "import_prices", None)
     utility_rate = getattr(data, "utility_rate", None)
+    import_prices_by_node = getattr(data, "import_prices_by_node", None)
+    utility_rate_by_node = getattr(data, "utility_rate_by_node", None)
     if import_prices is not None and len(import_prices) != n_time:
         raise ValueError(f"data.import_prices length {len(import_prices)} != time steps {n_time}")
+    if import_prices_by_node is not None:
+        for n, series in import_prices_by_node.items():
+            if n not in load_keys:
+                raise ValueError(f"data.import_prices_by_node contains unknown node {n!r}")
+            if len(series) != n_time:
+                raise ValueError(
+                    f"data.import_prices_by_node[{n!r}] length {len(series)} != time steps {n_time}"
+                )
+    if utility_rate_by_node is not None:
+        for n in utility_rate_by_node:
+            if n not in load_keys:
+                raise ValueError(f"data.utility_rate_by_node contains unknown node {n!r}")
     # Single import price vector for utility block cost function (from OpenEI or raw 8760/N).
     model.import_prices = import_prices
     # Optional ParsedRate for demand charges and metadata when grid block exists.
     model.utility_rate = utility_rate
+    # Optional node-scoped utility extensions (preferred when present).
+    model.import_prices_by_node = import_prices_by_node
+    model.utility_rate_by_node = utility_rate_by_node
 
     # -------------------------------------------------------------------------
     # Technology blocks (opt-in via technology_parameters)
@@ -142,17 +159,24 @@ def build_model(
     model.obj = pyo.Objective(rule=_objective_rule, sense=pyo.minimize)
 
     # -------------------------------------------------------------------------
-    # Reporting: total annual cost from existing assets (sunk / fixed).
-    # Blocks may define cost_existing_annual (e.g. O&M on existing, remaining
-    # debt on existing); summed here for post-processing and cost breakdown.
+    # Reporting cost buckets (not used by optimizer unless included in objective_contribution).
+    # Keep constant / non-optimizing costs visible for post-processing.
     # -------------------------------------------------------------------------
-    def _cost_existing_rule(m):
+    def _cost_non_optimizing_rule(m):
         total = 0.0
         for blk in m.component_objects(pyo.Block, descend_into=False):
-            if hasattr(blk, "cost_existing_annual"):
-                total += blk.cost_existing_annual
+            if hasattr(blk, "cost_non_optimizing_annual"):
+                total += blk.cost_non_optimizing_annual
         return total
 
-    model.total_cost_existing_annual = pyo.Expression(rule=_cost_existing_rule)
+    model.total_cost_non_optimizing_annual = pyo.Expression(rule=_cost_non_optimizing_rule)
+
+    # Explicit reporting totals:
+    # - optimizing annual cost follows objective_contribution sum
+    # - total reported annual cost = optimizing + non-optimizing fixed/background costs
+    model.total_optimizing_cost_annual = pyo.Expression(expr=model.obj.expr)
+    model.total_reported_annual_cost = pyo.Expression(
+        expr=model.total_optimizing_cost_annual + model.total_cost_non_optimizing_annual
+    )
 
     return model

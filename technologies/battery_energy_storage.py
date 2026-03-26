@@ -97,7 +97,7 @@ def add_battery_energy_storage_block(
 
        - If ``allow_adoption``: annualized capital on adopted kWh + O&M on total (existing + adopted) kWh.
        - If not: O&M on existing kWh only.
-       - ``cost_existing_annual``                  -> O&M on existing kWh (reporting; when adoption is on).
+       - ``cost_non_optimizing_annual``            -> O&M on existing kWh (reporting only).
 
     8. Constraints
 
@@ -202,27 +202,24 @@ def add_battery_energy_storage_block(
             _nodes, T, rule=lambda m, n, t: m.charge_power[n, t]
         )
 
-        # Cost terms: capital on adopted capacity (if any) + O&M on total capacity.
+        # Cost terms: objective keeps only decision-relevant terms.
         if allow_adoption:
             b.objective_contribution = sum(
                 r.capital_cost_per_kwh * b.energy_capacity_adopted[n] * r.amortization_factor
-                + r.om_per_kwh_year * b.total_energy_capacity[n]
+                + r.om_per_kwh_year * b.energy_capacity_adopted[n]
                 for n in _nodes
             )
-            # Existing‑asset annual cost for reporting (does not affect optimum).
-            b.cost_existing_annual = pyo.Expression(
+            # Reporting-only existing/background annual costs.
+            b.cost_non_optimizing_annual = pyo.Expression(
                 expr=sum(
                     r.om_per_kwh_year * r.existing_energy_capacity[n]
                     for n in _nodes
                 )
             )
         else:
-            # Existing‑only: objective includes O&M on existing capacity only.
-            b.objective_contribution = sum(
-                r.om_per_kwh_year * r.existing_energy_capacity[n]
-                for n in _nodes
-            )
-            b.cost_existing_annual = pyo.Expression(
+            # Existing‑only: no decision-dependent cost.
+            b.objective_contribution = pyo.Expression(expr=0.0)
+            b.cost_non_optimizing_annual = pyo.Expression(
                 expr=sum(
                     r.om_per_kwh_year * r.existing_energy_capacity[n]
                     for n in _nodes

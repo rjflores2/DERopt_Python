@@ -80,6 +80,29 @@ class CaseConfig:
     energy_price_column: str | None = None
     # Optional reduced-horizon run mode for faster development iterations.
     time_subset: TimeSubsetConfig | None = None
+    # Optional multi-tariff model:
+    # - first entry in utility_tariffs is the default tariff
+    # - all nodes use default unless overridden in node_utility_tariff
+    utility_tariffs: list["UtilityTariffConfig"] | None = None
+    # Optional overrides: node key -> tariff_key. Only specify exceptions from the default.
+    node_utility_tariff: dict[str, str] | None = None
+
+
+@dataclass(slots=True)
+class UtilityTariffConfig:
+    """Tariff source bundle used by per-node utility assignment.
+
+    Supported combinations per tariff:
+    - OpenEI only (utility_rate_path set, energy_price_path unset)
+    - raw only (energy_price_path set, utility_rate_path unset)
+    - OpenEI + raw override (both set; raw overrides energy prices only)
+    """
+
+    tariff_key: str
+    utility_rate_path: Path | None = None
+    utility_rate_item_index: int | None = None
+    energy_price_path: Path | None = None
+    energy_price_column: str | None = None
 
 
 def discover_load_file(folder: Path) -> Path:
