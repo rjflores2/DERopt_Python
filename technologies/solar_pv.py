@@ -67,40 +67,44 @@ def add_solar_pv_block(
     financials: dict[str, Any] | None = None,
 ) -> pyo.Block:
     """
-    Build and attach the Solar PV block (one node index per load bus, one profile index
+    Build and attach the Solar PV block (one node index per load bus, one solar profile index
     per solar resource column). The same solar potential time series is used at every node.
 
     1. Data and other inputs
-       - ``model.T``                                -> time periods (from ``model.core``) -> time index
-       - ``model.NODES``                            -> node keys (from ``model.core``, same as
-         ``data.static["electricity_load_keys"]``)  -> node index indicating the locations where solar PV can be installed and/or operated
-       - ``data.static["solar_production_keys"]``:  -> ordered list of solar profile keys 
-       - ``data.timeseries[profile]``               -> solar resource potential tiomseries data (kWh/kW installed capacity)
-       - ``solar_pv_params``                        -> user options; merged with defaults in
-       - ``financials``                             -> financial information and functions used to amortized capital / O&M costs
+       - ``data.static["solar_production_keys"]``   -> ordered Python list of solar profile keys
+       - ``data.timeseries[profile_key]``           -> solar potential timeseries data (kWh/kW installed capacity)
+       - ``solar_pv_params``                        -> user-supplied Solar PV parameters, merged with defaults
+       - ``financials``                             -> financial inputs used to annualize capital costs
 
-    2. Variables (Pyomo ``Var``)
-       - ``solar_generation[node, profile, t]``     -> kWh generated in period ``t`` (always).
-       - ``solar_capacity_adopted[node, profile]``  -> additional kW to install, only if allow_adotion is True
+    2. Sets (Pyomo ``Set``)
+       - ``model.T``                               -> time index used by the Solar PV block
+       - ``model.NODES``                           -> node index used by the Solar PV block
+       - ``b.SOLAR``                               -> solar profile index for the Solar PV block
+       - ``b.AREA_LIMIT_INDEX``                    -> index of ``(node, profile)`` pairs where an area limit is defined; only created if area limits are provided
 
-    3. Parameters (Pyomo ``Param``, fixed once built)
-       - ``solar_potential[profile, t]``            -> from data timeseries.
-       - ``efficiency[profile]``, ``                -> Solar PV system efficiency from solar_pv_params / params_by_profile
-       - ``capital_cost_per_kw[profile]``           -> Solar PV capital cost ($/kW installed) from solar_pv_params / params_by_profile 
-       - ``om_per_kw_year[profile]``:               -> Solar PV fixed O&M cost ($/kW installed*year) from solar_pv_params / params_by_profile 
-       - ``existing_solar_capacity[node, profile]`` -> Potentially existing solar capacity at each node (kW)
-       -  ``max_capacity_area[node, profile]``      -> Maximum allowable area for solar PV installation in m² , defined on ``AREA_LIMIT_INDEX`` (only for pairs listed in ``max_capacity_area_by_node_and_profile``).
+    3. Variables (Pyomo ``Var``)
+       - ``solar_generation[node, solar_profile, t]``     -> kWh generated in period ``t`` (always)
+       - ``solar_capacity_adopted[node, solar_profile]``  -> additional kW to install, only if ``allow_adoption`` is True
 
-    4. Contribution to electricity sources - ``electricity_source_term[node, t]``
-       - ``solar_generation[node, p, t]``
+    4. Parameters (Pyomo ``Param``, fixed once built)
+       - ``solar_potential[solar_profile, t]``            -> solar potential from ``data.timeseries`` (kWh/kW installed capacity)
+       - ``efficiency[solar_profile]``                    -> Solar PV system efficiency from ``solar_pv_params`` / ``params_by_profile``
+       - ``capital_cost_per_kw[solar_profile]``           -> Solar PV capital cost ($/kW installed) from ``solar_pv_params`` / ``params_by_profile``
+       - ``om_per_kw_year[solar_profile]``                -> Solar PV fixed O&M cost ($/kW-year) from ``solar_pv_params`` / ``params_by_profile``
+       - ``existing_solar_capacity[node, solar_profile]`` -> existing solar capacity at each node (kW)
+       - ``max_capacity_area[node, solar_profile]``       -> maximum allowable solar PV area (m²), defined on ``AREA_LIMIT_INDEX`` for listed ``(node, solar_profile)`` pairs
 
-    5. Contribution to the cost function  - ``objective``
-       - solar_capacity_adopted   -> annualized capital on adopted kW ($/kW), fixed O&M on adopted kW ($/kW*year)
-       - existing solar           -> If there is existing solar, we add O&M and remaining capital payments
+    5. Contribution to electricity sources - ``electricity_source_term[node, t]``
+       - sum of ``solar_generation[node, solar_profile, t]`` across all solar profiles
 
-    6. Constraints
-       - ``generation_limits_rule``                 ->  solar_generation <= (solar_capacity_adopted + existing_solar_capacity)*solar_potential`` 
-       - ``generation_limits_rule_existing_only``   ->  (existing + adopted) / efficiency <= max_capacity_area
+    6. Contribution to the cost function  - ``objective_contribution``
+       - adopted solar capacity   -> annualized capital on adopted kW plus fixed O&M on adopted kW
+       - existing solar capacity  -> fixed O&M plus optional existing-capital recovery on existing kW
+
+    7. Constraints
+       - ``generation_limits_rule``                 -> ``solar_generation <= (solar_capacity_adopted + existing_solar_capacity) * solar_potential``
+       - ``generation_limits_rule_existing_only``   -> ``solar_generation <= existing_solar_capacity * solar_potential``
+       - ``capacity_area_cap_rule``                 -> ``(existing_solar_capacity + solar_capacity_adopted) / efficiency <= max_capacity_area``
     """
     T = model.T # time index
     NODES = list(model.NODES) # node index

@@ -3,6 +3,8 @@
 Provides grid import variable, energy cost from import_prices, and demand charges from
 ParsedRate.demand_charges (flat and TOU). This is the generic grid/utility block; utility-specific
 loaders normalize their tariffs into ParsedRate so this block does not branch on utility names.
+
+Layout: ``_add_utility_block`` (main Pyomo builder) first, then small helpers, then ``register``.
 """
 
 from __future__ import annotations
@@ -11,60 +13,44 @@ from typing import Any
 
 import pyomo.environ as pyo
 
-
-def _tier_for_tou_demand_charge(dt, demand_charges: dict) -> int:
-    """Return demand-charge tier index for datetime dt using 12×24 weekday/weekend schedules."""
-    wd = demand_charges["demand_charge_weekdayschedule"]
-    we = demand_charges["demand_charge_weekendschedule"]
-    month = dt.month - 1
-    hour = dt.hour
-    is_weekend = dt.weekday() >= 5
-    sched = we if is_weekend else wd
-    n_tiers = len(demand_charges.get("demand_charge_ratestructure") or [])
-    if month < len(sched) and hour < len(sched[month]):
-        return min(sched[month][hour], max(0, n_tiers - 1))
-    return 0
+from data_loading.loaders.utility_rates.customer_charge_horizon import (
+    fixed_customer_charges_horizon_usd,
+)
 
 
 def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
     """
-    Build and attach the grid / utility import block when energy prices and/or demand charges
-    are available; otherwise return ``None``.
+    Build and attach the grid / utility import block when energy prices, demand charges,
+    and/or prorated fixed customer charges apply; otherwise return ``None``.
 
     1. Data and other inputs
-
        - ``model.T``                                -> time periods (from ``model.core``).
        - ``model.NODES``                            -> node keys (same as ``electricity_load_keys``).
-       - ``model.import_prices``                    -> optional length-|T| energy price vector ($/kWh); may be
-                                                       absent if only demand charges are modeled (then prices default to 0).
+       - ``model.import_prices``                    -> optional length-|T| energy price vector ($/kWh); may be absent if only demand charges are modeled (then prices default to 0).
        - ``model.utility_rate``                     -> optional parsed tariff; ``demand_charges`` supplies flat/TOU demand logic.
        - ``data.timeseries["datetime"]``            -> timestamps for mapping hours to bill months / TOU tiers when present.
 
     2. Variables (Pyomo ``Var``)
-
        - ``grid_import[node, t]``                   -> grid energy purchased in period ``t`` (kWh).
        - ``P_flat_m{month}``                        -> flat-demand peak proxy (kW) per applicable bill month, when configured.
        - ``P_tou_tier{tier}``                       -> TOU demand peak proxy (kW) per rate tier, when configured.
 
     3. Parameters (Pyomo ``Param``)
-
        - ``import_price[t]``                        -> energy price ($/kWh) per period (zeros if only demand charges).
 
     4. Contribution to electricity sources — ``electricity_source_term[node, t]``
-
        - ``grid_import[node, t]``
 
-    5. Contribution to electricity sinks — ``electricity_sink_term``
-
-       - (none on this block; grid imports are supply-only here.)
-
-    6. Contribution to the cost function — ``objective_contribution``
-
+    5. Contribution to the cost function — ``objective_contribution``
        - ``energy_import_cost``                     -> ``sum_t import_price[t] * sum_n grid_import[n,t]``.
        - ``nonTOU_Demand_Charge_Cost``              -> flat demand charge $ when ``demand_charge_type`` includes flat/both.
        - ``TOU_Demand_Charge_Cost``                 -> TOU demand charge $ when type includes tou/both.
-       - ``objective_contribution``                 -> sum of energy + flat + TOU expressions above.
-       - ``cost_existing_annual``                  -> ``0`` (placeholder for symmetry with tech blocks).
+       - Fixed customer charges (meter / minimum)   -> constant USD from
+         ``fixed_customer_charges_horizon_usd`` (daily × distinct days; monthly prorated by
+         fraction of each calendar month covered by ``data.timeseries["datetime"]``).
+
+    6. ``cost_existing_annual``
+       - Same constant as the fixed customer-charge portion (usage-independent utility fees).
 
     7. Constraints
 
@@ -74,8 +60,6 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
     import_prices = getattr(model, "import_prices", None)
     utility_rate = getattr(model, "utility_rate", None)
     demand_charges = getattr(utility_rate, "demand_charges", None) if utility_rate is not None else None
-    if import_prices is None and not (demand_charges and demand_charges.get("demand_charge_type")):
-        return None
 
     T = model.T
     NODES = list(model.NODES)
@@ -84,7 +68,16 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
     if datetimes is None or len(datetimes) != len(_T):
         datetimes = [None] * len(_T)
 
-    # If no energy prices but we have demand charges, use zero energy cost so demand charges still apply.
+    fc = getattr(utility_rate, "customer_fixed_charges", None) if utility_rate is not None else None
+    fixed_usd = fixed_customer_charges_horizon_usd(fc, datetimes)
+
+    has_energy_or_demand = import_prices is not None or (
+        demand_charges and demand_charges.get("demand_charge_type")
+    )
+    if not has_energy_or_demand and fixed_usd == 0:
+        return None
+
+    # If no energy prices but we have demand charges or fixed charges, use zero energy cost per period.
     prices = list(import_prices) if import_prices is not None else [0.0] * len(_T)
 
     def block_rule(b):
@@ -158,11 +151,30 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
         # Expose demand-charge components separately for reporting; names match common rate language.
         b.nonTOU_Demand_Charge_Cost = pyo.Expression(expr=sum(flat_demand_charge_terms) if flat_demand_charge_terms else 0.0)
         b.TOU_Demand_Charge_Cost = pyo.Expression(expr=sum(tou_demand_charge_terms) if tou_demand_charge_terms else 0.0)
-        b.objective_contribution = b.energy_import_cost + b.nonTOU_Demand_Charge_Cost + b.TOU_Demand_Charge_Cost
-        b.cost_existing_annual = pyo.Expression(expr=0.0)
+        b.objective_contribution = (
+            b.energy_import_cost
+            + b.nonTOU_Demand_Charge_Cost
+            + b.TOU_Demand_Charge_Cost
+            + fixed_usd
+        )
+        b.cost_existing_annual = pyo.Expression(expr=fixed_usd)
 
     model.utility = pyo.Block(rule=block_rule)
     return model.utility
+
+
+def _tier_for_tou_demand_charge(dt, demand_charges: dict) -> int:
+    """Return demand-charge tier index for datetime dt using 12×24 weekday/weekend schedules."""
+    wd = demand_charges["demand_charge_weekdayschedule"]
+    we = demand_charges["demand_charge_weekendschedule"]
+    month = dt.month - 1
+    hour = dt.hour
+    is_weekend = dt.weekday() >= 5
+    sched = we if is_weekend else wd
+    n_tiers = len(demand_charges.get("demand_charge_ratestructure") or [])
+    if month < len(sched) and hour < len(sched[month]):
+        return min(sched[month][hour], max(0, n_tiers - 1))
+    return 0
 
 
 def register(model: Any, data: Any) -> pyo.Block | None:

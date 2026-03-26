@@ -31,6 +31,9 @@ def _register_loaders() -> None:
             importlib.import_module(f".{modname}", pkg)
 
 
+from data_loading.loaders.utility_rates.customer_charge_horizon import (
+    fixed_customer_charges_horizon_usd,
+)
 from data_loading.loaders.utility_rates.raw_timeseries import (
     RawEnergyPriceSeries,
     load_raw_energy_prices,
@@ -87,6 +90,7 @@ __all__ = [
     "get_loader",
     "import_prices_for_timestamps",
     "get_import_prices_for_timestamps",
+    "fixed_customer_charges_horizon_usd",
     "RawEnergyPriceSeries",
     "load_raw_energy_prices",
 ]
