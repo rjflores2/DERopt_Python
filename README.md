@@ -69,13 +69,17 @@ Use the **resulting key** in config when keying by profile name (e.g. in `max_ca
 
 ### Technology parameters (solar)
 
-Solar technoeconomic parameters (efficiency, capital cost, O&M, area limits (per profile)) are set via case config’s `technology_parameters["solar_pv"]`; defaults live in `technologies/solar_pv.py`. When you have multiple solar profiles (e.g. fixed and 1-D tracking), give each its own values by setting **`params_by_profile`** to a **list in the same order as your solar data columns** (first list entry = first profile, second = second, etc.). Each profile can have its own area limit via **`max_capacity_area_by_profile`** (list in SOLAR order)—e.g. south-facing vs east-facing roof area:
+Solar technoeconomic parameters (efficiency, capital cost, O&M, area limits) are set via case config’s `technology_parameters["solar_pv"]`; defaults live in `technologies/solar_pv/inputs.py`. When you have multiple solar profiles (e.g. fixed and 1-D tracking), give each its own values by setting **`params_by_profile`** to a **list in the same order as your solar data columns** (first list entry = first profile, second = second, etc.). Area limits are configured per `(node, profile)` via **`max_capacity_area_by_node_and_profile`** using either a tuple-key dict or nested dict.
 
 ```python
 # Example: two profiles (e.g. fixed, then 1-D tracking) — order must match solar_production_keys
 technology_parameters={
     "solar_pv": {
-        "max_capacity_area_by_profile": [500, 300],  # area limit per profile (e.g. south roof, east roof)
+        # Area by node/profile (tuple-key form)
+        "max_capacity_area_by_node_and_profile": {
+            ("electricity_load__a", "solar_production__fixed_optimal"): 500,
+            ("electricity_load__a", "solar_production__1d_tracking"): 300,
+        },
         "params_by_profile": [
             {"efficiency": 0.20, "capital_cost_per_kw": 1500, "om_per_kw_year": 18},
             {"efficiency": 0.22, "capital_cost_per_kw": 2100, "om_per_kw_year": 24},
@@ -85,6 +89,22 @@ technology_parameters={
 ```
 
 You can override only some fields per profile; the rest come from the top-level `solar_pv` dict or from defaults. Existing capacity is per (node, profile): set **`existing_solar_capacity_by_node_and_profile`** to `{(node_key, profile_key): kW}` or `{node_key: {profile_key: kW}}`; default is 0 at every node.
+
+### Utility tariffs (single and multi-node)
+
+Utility costs are attached via `utilities/electricity_import_export/` and support both:
+
+- **Single tariff** via `CaseConfig.utility_rate_path` (OpenEI) and/or `CaseConfig.energy_price_path` (raw series)
+- **Multi-tariff** via `CaseConfig.utility_tariffs` with optional node exceptions in `CaseConfig.node_utility_tariff`
+
+For multi-tariff:
+
+- `utility_tariffs[0]` is the default tariff
+- all nodes use the default unless listed in `node_utility_tariff`
+- `node_utility_tariff` should include only exceptions
+- repeated tariff definitions are loaded once and reused across nodes
+
+Energy prices are resolved per node and aligned to model timesteps. For OpenEI TOU energy pricing, load datetimes are required. Demand charges (flat/TOU) require both datetimes and `data.static["time_step_hours"]`.
 
 ## Adding a new case
 
@@ -132,7 +152,7 @@ When adding or changing code, prefer **explicit validation and early raises** ov
 | `data_loading/` | Loaders that read data and populate the DataContainer |
 | `model/` | Pyomo model assembly (`core.py` is the central meeting place) |
 | `technologies/` | Technology modules (PV, wind, batteries, etc.) |
-| `utilities/` | Grid/tariff and network (import/export, multi-node) |
+| `utilities/` | Grid/tariff and network; `electricity_import_export/` mirrors tech packages (`block`, `inputs`, `demand_charge_indexing`, `diagnostics`) |
 | `run/playground.py` | Main entry point |
 | `shared/` | Shared utilities (e.g. financials) |
 
