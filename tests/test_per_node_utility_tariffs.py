@@ -166,6 +166,58 @@ def test_build_run_data_multitariff_default_plus_override(monkeypatch, tmp_path:
     assert data.utility_rate_by_node["electricity_load__b"].demand_charges is not None
 
 
+def test_build_run_data_shares_one_price_vector_per_tariff(monkeypatch, tmp_path: Path):
+    """Nodes on the same tariff should reference the same list (memory O(tariffs*T), not O(nodes*T))."""
+
+    def fake_load_energy_load(_cfg):
+        return _two_node_data()
+
+    def fake_load_openei_rate(_path, *, item_index=None):
+        return ParsedRate(rate_type="tou", utility="U", name="R", demand_charges=None)
+
+    class FakeRaw:
+        def __init__(self):
+            self.prices = [0.11, 0.22]
+
+    def fake_load_raw_energy_prices(_path, *, price_column=None):
+        return FakeRaw()
+
+    monkeypatch.setattr(brd, "load_energy_load", fake_load_energy_load)
+    monkeypatch.setattr(brd, "load_openei_rate", fake_load_openei_rate)
+    monkeypatch.setattr(brd, "load_raw_energy_prices", fake_load_raw_energy_prices)
+    monkeypatch.setattr(brd, "get_import_prices_for_timestamps", lambda source, timestamps: list(source.prices))
+
+    rate = tmp_path / "rate.json"
+    price = tmp_path / "prices.csv"
+    rate.write_text("{}", encoding="utf-8")
+    price.write_text("p\n0\n", encoding="utf-8")
+
+    case_cfg = SimpleNamespace(
+        energy_load=SimpleNamespace(csv_path=tmp_path / "loads.csv"),
+        solar_path=None,
+        utility_rate_path=None,
+        utility_rate_item_index=None,
+        energy_price_path=None,
+        energy_price_column=None,
+        utility_tariffs=[
+            UtilityTariffConfig(
+                tariff_key="only",
+                utility_rate_path=rate,
+                energy_price_path=price,
+            ),
+        ],
+        node_utility_tariff=None,
+        time_subset=None,
+    )
+    case_cfg.energy_load.csv_path.write_text("Date,Electric Demand (kW)\n", encoding="utf-8")
+
+    data = brd.build_run_data(tmp_path, case_cfg)
+    a = data.import_prices_by_node["electricity_load__a"]
+    b = data.import_prices_by_node["electricity_load__b"]
+    assert a is b
+    assert a == [0.11, 0.22]
+
+
 def test_invalid_override_node_or_tariff_key_fails(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(brd, "load_energy_load", lambda _cfg: _two_node_data())
     monkeypatch.setattr(brd, "load_openei_rate", lambda _p, *, item_index=None: ParsedRate(rate_type="tou", utility="U", name="X"))

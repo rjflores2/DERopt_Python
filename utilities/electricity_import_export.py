@@ -28,10 +28,8 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
     Under this assumption, energy prices, demand charges, and fixed customer charges are applied per node.
 
     1. Data and other inputs
-       - ``model.import_prices_by_node``            -> optional per-node import price vectors ($/kWh); preferred path
-       - ``model.utility_rate_by_node``             -> optional per-node parsed tariff objects; preferred path
-       - ``model.import_prices``                    -> optional legacy single length-|T| import price vector ($/kWh)
-       - ``model.utility_rate``                     -> optional legacy single parsed tariff object
+       - ``model.import_prices_by_node``            -> optional per-node import price vectors ($/kWh)
+       - ``model.utility_rate_by_node``             -> optional per-node parsed tariff objects
        - ``data.static["time_step_hours"]``         -> required when any demand charges are active (used to convert kWh/period to kW)
        - ``data.timeseries["datetime"]``            -> required when any demand charges are active (used to map timesteps into bill months and TOU tiers); also used to prorate fixed customer charges across the represented horizon
 
@@ -65,8 +63,6 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
        - ``flat_demand_charge_ub_m*_t*``           -> monthly: ``P_flat_m >= sum_n grid_import_power_kw[n,t]`` for all timesteps in month
        - ``tou_demand_charge_ub_m*_tier*_t*``      -> monthly-by-tier: ``P_tou_m{m}_tier{tier} >= sum_n grid_import_power_kw[n,t]`` for all timesteps in month mapped to that TOU tier
     """
-    import_prices = getattr(model, "import_prices", None)
-    utility_rate = getattr(model, "utility_rate", None)
     import_prices_by_node = getattr(model, "import_prices_by_node", None)
     utility_rate_by_node = getattr(model, "utility_rate_by_node", None)
 
@@ -77,34 +73,37 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
     if datetimes is None or len(datetimes) != len(_T):
         datetimes = [None] * len(_T)
 
-    # Resolve node-scoped utility inputs (preferred); fall back to legacy single-tariff fields.
+    # Resolve node-scoped utility inputs.
     prices_by_node: dict[str, list[float]] = {}
     rates_by_node: dict[str, Any | None] = {}
+    _zero_prices = [0.0] * len(_T)
     for n in NODES:
         p = None
         if isinstance(import_prices_by_node, dict):
             p = import_prices_by_node.get(n)
-        if p is None and import_prices is not None:
-            p = import_prices
-        prices_by_node[n] = list(p) if p is not None else [0.0] * len(_T)
+        # Avoid copying shared price vectors (same list may back many nodes on one tariff).
+        if p is not None:
+            prices_by_node[n] = p if len(p) == len(_T) else list(p)
+        else:
+            prices_by_node[n] = _zero_prices
 
         r = None
         if isinstance(utility_rate_by_node, dict):
             r = utility_rate_by_node.get(n)
-        if r is None:
-            r = utility_rate
         rates_by_node[n] = r
 
+    # Check if any node has demand charges.
     def _demand_type_for_node(node: str) -> str | None:
         dc = getattr(rates_by_node[node], "demand_charges", None) if rates_by_node[node] is not None else None
-        dtp = dc.get("demand_charge_type") if isinstance(dc, dict) else None
-        if dtp in ("flat", "tou", "both"):
-            return dtp
+        demand_charge_type = dc.get("demand_charge_type") if isinstance(dc, dict) else None
+        if demand_charge_type in ("flat", "tou", "both"):
+            return demand_charge_type
         return None
 
-    has_any_demand = any(_demand_type_for_node(n) is not None for n in NODES)
+    has_any_demand_charges = any(_demand_type_for_node(n) is not None for n in NODES)
+    dt_hours_f: float | None = None
     # Time-step-dependent components require explicit time_step_hours.
-    if has_any_demand:
+    if has_any_demand_charges:
         dt_hours = (getattr(data, "static", {}) or {}).get("time_step_hours")
         if dt_hours is None:
             raise ValueError(
@@ -128,8 +127,6 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
                 "Demand charges are present but data.timeseries['datetime'] is missing or misaligned with the run horizon. "
                 "Demand-charge month/tier mapping requires one valid datetime per period."
             )
-    else:
-        dt_hours_f = 1.0
 
     # Fixed customer charges are reporting-only and billed per node (node=customer assumption).
     fixed_usd = sum(
@@ -140,21 +137,23 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
         for n in NODES
     )
 
-    has_energy_or_demand = (
-        import_prices is not None
-        or isinstance(import_prices_by_node, dict)
-        or has_any_demand
-    )
+    has_node_energy_prices = isinstance(import_prices_by_node, dict) and bool(import_prices_by_node)
+    has_energy_or_demand = has_node_energy_prices or has_any_demand_charges
+    
+    # Checking if utility block should get built
     if not has_energy_or_demand and fixed_usd == 0:
         return None
 
+    #Sanitize node names for Pyomo block names.
     def _tok(x: str) -> str:
         return re.sub(r"[^0-9A-Za-z_]+", "_", x)
 
     def block_rule(b): #Pyomo block 
         b.grid_import = pyo.Var(NODES, T, within=pyo.NonNegativeReals) # Grid import variable (kWh/period)
         # Power proxy for demand charges: kWh/period ÷ (h/period) = kW.
-        if has_any_demand:
+        if has_any_demand_charges:
+            if dt_hours_f is None:
+                raise RuntimeError("Internal error: dt_hours_f must be set when demand charges are active.")
             b.grid_import_power_kw = pyo.Expression( # Power proxy for demand charges: kWh/period ÷ (h/period) = kW.
                 NODES,
                 T,

@@ -182,11 +182,14 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
         data.import_prices_by_node = {}
         data.utility_rate_by_node = {}
         data.node_utility_tariff_key = dict(node_tariff_key)
+        # One shared zero vector for tariffs with no resolved energy prices (memory: O(T), not O(nodes*T)).
+        zero_prices = [0.0] * n_periods
         for n in nodes:
             tkey = node_tariff_key[n]
             ur, ip = tariff_resolved[tkey]
             data.utility_rate_by_node[n] = ur
-            data.import_prices_by_node[n] = list(ip) if ip is not None else [0.0] * n_periods
+            # Share the same list object for all nodes on the same tariff (no per-node copy).
+            data.import_prices_by_node[n] = ip if ip is not None else zero_prices
 
         # Backward-compatible mirrors: set to default tariff.
         d_ur, d_ip = tariff_resolved[default_key]

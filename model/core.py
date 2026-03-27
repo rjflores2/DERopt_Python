@@ -24,7 +24,7 @@ def build_model(
     """Build a Pyomo model with time set T and attach technology blocks when data supports them.
 
     Technologies: only those in technology_parameters with a non-None value are included; use {} for defaults.
-    Utility data (import_prices, utility_rate) is read from data so the model has a single data contract.
+    Utility data (node-scoped prices/rates) is read from data so the model has a single data contract.
     Returns None if data is None (backward compatibility).
     """
     # No data: return None so callers can handle "no model" without error.
@@ -48,13 +48,18 @@ def build_model(
     model.NODES = pyo.Set(initialize=list(load_keys), ordered=True)
 
     n_time = len(data.indices["time"])
-    # getattr: DataContainer may come from older code or tests that don't set these; avoid AttributeError.
-    import_prices = getattr(data, "import_prices", None)
-    utility_rate = getattr(data, "utility_rate", None)
     import_prices_by_node = getattr(data, "import_prices_by_node", None)
     utility_rate_by_node = getattr(data, "utility_rate_by_node", None)
+    # Normalize any single-tariff data into node-scoped maps so downstream utility
+    # code only needs one data shape.
+    import_prices = getattr(data, "import_prices", None)
+    utility_rate = getattr(data, "utility_rate", None)
     if import_prices is not None and len(import_prices) != n_time:
         raise ValueError(f"data.import_prices length {len(import_prices)} != time steps {n_time}")
+    if import_prices_by_node is None and import_prices is not None:
+        import_prices_by_node = {n: import_prices for n in load_keys}
+    if utility_rate_by_node is None and utility_rate is not None:
+        utility_rate_by_node = {n: utility_rate for n in load_keys}
     if import_prices_by_node is not None:
         for n, series in import_prices_by_node.items():
             if n not in load_keys:
@@ -67,11 +72,7 @@ def build_model(
         for n in utility_rate_by_node:
             if n not in load_keys:
                 raise ValueError(f"data.utility_rate_by_node contains unknown node {n!r}")
-    # Single import price vector for utility block cost function (from OpenEI or raw 8760/N).
-    model.import_prices = import_prices
-    # Optional ParsedRate for demand charges and metadata when grid block exists.
-    model.utility_rate = utility_rate
-    # Optional node-scoped utility extensions (preferred when present).
+    # Node-scoped utility inputs (prices and parsed rates).
     model.import_prices_by_node = import_prices_by_node
     model.utility_rate_by_node = utility_rate_by_node
 

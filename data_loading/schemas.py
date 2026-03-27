@@ -21,6 +21,8 @@ class DataContainer:
     utility_rate: Any = None
     # Utility (optional per-node extension):
     # node = customer/meter assumption for utility billing.
+    # Values may share the same list object across nodes when multiple nodes use the same tariff
+    # (memory-efficient; treat as read-only after load).
     import_prices_by_node: dict[str, list[float]] | None = None
     utility_rate_by_node: dict[str, Any] | None = None
     node_utility_tariff_key: dict[str, str] | None = None
