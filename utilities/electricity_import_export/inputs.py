@@ -41,6 +41,9 @@ def demand_charge_type_for_node(
     return None
 
 
+# --- resolve_utility_inputs: energy prices, tariff objects, demand prerequisites, fixed fees ---
+
+
 def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | None:
     """Merge node-scoped prices/rates, validate demand-charge prerequisites, fixed charges.
 
@@ -56,9 +59,11 @@ def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | Non
     if datetimes is None or len(datetimes) != len(time_indices):
         datetimes = [None] * len(time_indices)
 
+    # --- Energy charges: per-node import price ($/kWh) over the horizon ---
     prices_by_node: dict[str, list[float]] = {}
-    utility_tariff_by_node: dict[str, Any | None] = {}
     zero_prices = [0.0] * len(time_indices)
+    # --- Tariffs per node (demand schedules/rates + fixed customer metadata) ---
+    utility_tariff_by_node: dict[str, Any | None] = {}
     for node in nodes:
         import_price_series = None
         if isinstance(import_prices_by_node, dict):
@@ -77,6 +82,7 @@ def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | Non
             parsed_tariff = utility_rate_by_node.get(node)
         utility_tariff_by_node[node] = parsed_tariff
 
+    # --- Demand charges: if any node has flat/tou/both, require timestep duration and valid datetimes ---
     has_any_demand_charges = any(
         demand_charge_type_for_node(utility_tariff_by_node, node) is not None for node in nodes
     )
@@ -106,6 +112,7 @@ def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | Non
                 "Demand-charge month/tier mapping requires one valid datetime per period."
             )
 
+    # --- Fixed customer charges (usage-independent fees; prorated over horizon using datetimes) ---
     fixed_usd = sum(
         fixed_customer_charges_horizon_usd(
             getattr(utility_tariff_by_node[node], "customer_fixed_charges", None)
@@ -116,6 +123,7 @@ def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | Non
         for node in nodes
     )
 
+    # --- Build the block only if something billable is present ---
     has_node_energy_prices = isinstance(import_prices_by_node, dict) and bool(import_prices_by_node)
     has_energy_or_demand = has_node_energy_prices or has_any_demand_charges
     if not has_energy_or_demand and fixed_usd == 0:

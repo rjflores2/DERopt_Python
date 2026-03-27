@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# --- URDB / schedule helpers (rates and TOU tier from datetime) ---
+
 
 def rate_from_urdb_structure(struct: Any) -> float:
     """Best-effort extract of ``rate`` from OpenEI/URDB (possibly nested) structures.
@@ -42,6 +44,9 @@ def tier_index_for_tou_demand_charge(dt: Any, demand_charges: dict[str, Any]) ->
     return 0
 
 
+# --- Calendar: map simulation timesteps to billing (year, month) ---
+
+
 def times_by_year_month_from_datetimes(
     datetimes: list[Any | None],
     time_indices: list[int],
@@ -64,6 +69,9 @@ def sorted_year_month_keys(
 ) -> list[tuple[int, int]]:
     """Sorted distinct ``(year, month_index)`` keys present in the run."""
     return sorted(times_by_year_month.keys())
+
+
+# --- Flat demand: which nodes and $/kW apply in a calendar month ---
 
 
 def flat_demand_nodes_and_rates_for_month(
@@ -107,6 +115,9 @@ def flat_demand_nodes_and_rates_for_month(
         flat_nodes.append(node)
         flat_rate_by_node[node] = rate_from_urdb_structure(flat_struct[struct_idx])
     return flat_nodes, flat_rate_by_node
+
+
+# --- TOU demand: group (node, timestep) by tier for peak constraints ---
 
 
 @dataclass(frozen=True)

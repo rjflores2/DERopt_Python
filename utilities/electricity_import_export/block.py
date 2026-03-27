@@ -74,11 +74,19 @@ def add_utility_block(model: Any, data: Any) -> pyo.Block | None:
     fixed_usd = resolved.fixed_usd
     time_indices = resolved.time_indices
 
-    times_by_year_month = times_by_year_month_from_datetimes(datetimes, time_indices)
-    year_months_in_run = sorted_year_month_keys(times_by_year_month)
+    # Demand charges only: map each timestep to a calendar (year, month) for monthly peak envelopes.
+    if has_any_demand_charges:
+        times_by_year_month = times_by_year_month_from_datetimes(datetimes, time_indices)
+        year_months_in_run = sorted_year_month_keys(times_by_year_month)
+    else:
+        times_by_year_month = {}
+        year_months_in_run = []
 
     def block_rule(utility_block):
+        # --- Grid import (kWh/period): shared by energy charges, demand peaks, and the electricity balance ---
         utility_block.grid_import = pyo.Var(NODES, T, within=pyo.NonNegativeReals)
+
+        # --- Demand charges: average kW over each period from kWh/period (only if any node has demand charges) ---
         if has_any_demand_charges:
             if dt_hours_f is None:
                 raise RuntimeError("Internal error: dt_hours_f must be set when demand charges are active.")
@@ -87,11 +95,14 @@ def add_utility_block(model: Any, data: Any) -> pyo.Block | None:
                 T,
                 rule=lambda m, node, t: m.grid_import[node, t] / dt_hours_f,
             )
+
         utility_block.electricity_source_term = pyo.Expression(
             NODES,
             T,
             rule=lambda m, node, t: m.grid_import[node, t],
         )
+
+        # --- Energy charges: $/kWh × kWh imported (per node, per time) ---
         utility_block.import_price = pyo.Param(
             NODES,
             T,
@@ -106,6 +117,8 @@ def add_utility_block(model: Any, data: Any) -> pyo.Block | None:
             for node in NODES
             for t in T
         )
+
+        # --- Demand charges: monthly flat and TOU peak proxies ($/kW × peak kW) ---
         flat_demand_charge_terms = []
         tou_demand_charge_terms = []
 
@@ -179,11 +192,14 @@ def add_utility_block(model: Any, data: Any) -> pyo.Block | None:
         utility_block.TOU_Demand_Charge_Cost = pyo.Expression(
             expr=sum(tou_demand_charge_terms) if tou_demand_charge_terms else 0.0
         )
+
+        # --- Optimizing objective: energy + demand (fixed fees are reported separately) ---
         utility_block.objective_contribution = (
             utility_block.energy_import_cost
             + utility_block.nonTOU_Demand_Charge_Cost
             + utility_block.TOU_Demand_Charge_Cost
         )
+        # --- Fixed customer charges (USD over horizon; non-optimizing / reporting) ---
         utility_block.cost_non_optimizing_annual = pyo.Expression(expr=fixed_usd)
 
     model.utility = pyo.Block(rule=block_rule)
