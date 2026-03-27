@@ -81,24 +81,24 @@ def add_battery_energy_storage_block(
         nodes=nodes,
     )
 
-    def block_rule(b):
-        b.capital_cost_per_kwh = pyo.Param(
+    def block_rule(battery_block):
+        battery_block.capital_cost_per_kwh = pyo.Param(
             initialize=resolved.capital_cost_per_kwh,
             within=pyo.Reals,
             mutable=True,
         )
-        b.om_per_kwh_year = pyo.Param(
+        battery_block.om_per_kwh_year = pyo.Param(
             initialize=resolved.om_per_kwh_year,
             within=pyo.Reals,
             mutable=True,
         )
 
-        b.energy_state = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
-        b.charge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
-        b.discharge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
+        battery_block.energy_state = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
+        battery_block.charge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
+        battery_block.discharge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
 
         if allow_adoption:
-            b.energy_capacity_adopted = pyo.Var(nodes, within=pyo.NonNegativeReals)
+            battery_block.energy_capacity_adopted = pyo.Var(nodes, within=pyo.NonNegativeReals)
 
             def total_energy_capacity(m, node):
                 return resolved.existing_energy_capacity[node] + m.energy_capacity_adopted[node]
@@ -106,12 +106,12 @@ def add_battery_energy_storage_block(
             def total_energy_capacity(m, node):
                 return resolved.existing_energy_capacity[node]
 
-        b.total_energy_capacity = pyo.Expression(nodes, rule=total_energy_capacity)
+        battery_block.total_energy_capacity = pyo.Expression(nodes, rule=total_energy_capacity)
 
         def energy_capacity_limit_rule(m, node, t):
             return m.energy_state[node, t] <= m.total_energy_capacity[node]
 
-        b.energy_capacity_limit = pyo.Constraint(nodes, T, rule=energy_capacity_limit_rule)
+        battery_block.energy_capacity_limit = pyo.Constraint(nodes, T, rule=energy_capacity_limit_rule)
 
         def charge_power_limit_rule(m, node, t):
             return m.charge_power[node, t] <= (
@@ -123,67 +123,72 @@ def add_battery_energy_storage_block(
                 resolved.max_discharge_power_per_kwh * m.total_energy_capacity[node]
             )
 
-        b.charge_power_limit = pyo.Constraint(nodes, T, rule=charge_power_limit_rule)
-        b.discharge_power_limit = pyo.Constraint(nodes, T, rule=discharge_power_limit_rule)
+        battery_block.charge_power_limit = pyo.Constraint(nodes, T, rule=charge_power_limit_rule)
+        battery_block.discharge_power_limit = pyo.Constraint(nodes, T, rule=discharge_power_limit_rule)
 
         def energy_balance_rule(m, node, t):
-            idx = time_index[t]
-            prev_t = horizon[-1] if idx == 0 else horizon[idx - 1]
+            time_step_index = time_index[t]
+            previous_time_step = horizon[-1] if time_step_index == 0 else horizon[time_step_index - 1]
             return m.energy_state[node, t] == (
-                m.energy_state[node, prev_t]
+                m.energy_state[node, previous_time_step]
                 + resolved.charge_efficiency * m.charge_power[node, t]
                 - (1.0 / resolved.discharge_efficiency) * m.discharge_power[node, t]
             )
 
-        b.energy_balance = pyo.Constraint(nodes, T, rule=energy_balance_rule)
+        battery_block.energy_balance = pyo.Constraint(nodes, T, rule=energy_balance_rule)
 
         if resolved.initial_soc_fraction is not None and horizon:
-            t0 = horizon[0]
+            first_time_step = horizon[0]
 
             def initial_soc_rule(m, node):
-                return m.energy_state[node, t0] == (
+                return m.energy_state[node, first_time_step] == (
                     resolved.initial_soc_fraction * m.total_energy_capacity[node]
                 )
 
-            b.initial_soc = pyo.Constraint(nodes, rule=initial_soc_rule)
+            battery_block.initial_soc = pyo.Constraint(nodes, rule=initial_soc_rule)
 
-        b.electricity_source_term = pyo.Expression(
+        battery_block.electricity_source_term = pyo.Expression(
             nodes,
             T,
             rule=lambda m, node, t: m.discharge_power[node, t],
         )
-        b.electricity_sink_term = pyo.Expression(
+        battery_block.electricity_sink_term = pyo.Expression(
             nodes,
             T,
             rule=lambda m, node, t: m.charge_power[node, t],
         )
 
         if allow_adoption:
-            b.battery_capital_costs = pyo.Expression(
+            battery_block.battery_capital_costs = pyo.Expression(
                 expr=sum(
-                    b.capital_cost_per_kwh * b.energy_capacity_adopted[node] * resolved.amortization_factor
+                    battery_block.capital_cost_per_kwh
+                    * battery_block.energy_capacity_adopted[node]
+                    * resolved.amortization_factor
                     for node in nodes
                 )
             )
-            b.battery_fixed_operations_and_maintenance = pyo.Expression(
-                expr=sum(b.om_per_kwh_year * b.energy_capacity_adopted[node] for node in nodes)
-            )
-            b.objective_contribution = pyo.Expression(
-                expr=b.battery_capital_costs + b.battery_fixed_operations_and_maintenance
-            )
-            b.cost_non_optimizing_annual = pyo.Expression(
+            battery_block.battery_fixed_operations_and_maintenance = pyo.Expression(
                 expr=sum(
-                    b.om_per_kwh_year * resolved.existing_energy_capacity[node]
+                    battery_block.om_per_kwh_year * battery_block.energy_capacity_adopted[node]
+                    for node in nodes
+                )
+            )
+            battery_block.objective_contribution = pyo.Expression(
+                expr=battery_block.battery_capital_costs + battery_block.battery_fixed_operations_and_maintenance
+            )
+            battery_block.cost_non_optimizing_annual = pyo.Expression(
+                expr=sum(
+                    battery_block.om_per_kwh_year * resolved.existing_energy_capacity[node]
                     for node in nodes
                 )
             )
         else:
-            b.battery_capital_costs = pyo.Expression(expr=0.0)
-            b.battery_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
-            b.objective_contribution = pyo.Expression(expr=0.0)
-            b.cost_non_optimizing_annual = pyo.Expression(
+            battery_block.battery_capital_costs = pyo.Expression(expr=0.0)
+            battery_block.battery_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
+            battery_block.objective_contribution = pyo.Expression(expr=0.0)
+            battery_block.cost_non_optimizing_annual = pyo.Expression(
                 expr=sum(
-                    b.om_per_kwh_year * resolved.existing_energy_capacity[node]
+                    battery_block.om_per_kwh_year * resolved.existing_energy_capacity[node]
                     for node in nodes
                 )
             )

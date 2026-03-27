@@ -44,13 +44,13 @@ def _params_per_profile(
     capital_list: list[float] = []
     om_list: list[float] = []
 
-    for i, key in enumerate(solar_profiles):
+    for profile_idx, solar_profile_key in enumerate(solar_profiles):
         if by_profile is None:
             overrides = {}
         elif isinstance(by_profile, dict):
-            overrides = (by_profile.get(key) or {}).copy()
-        elif isinstance(by_profile, list) and i < len(by_profile):
-            overrides = (by_profile[i] or {}).copy()
+            overrides = (by_profile.get(solar_profile_key) or {}).copy()
+        elif isinstance(by_profile, list) and profile_idx < len(by_profile):
+            overrides = (by_profile[profile_idx] or {}).copy()
         else:
             overrides = {}
 
@@ -70,19 +70,19 @@ def _existing_capital_recovery_per_kw_list(
 ) -> list[float]:
     by_profile = global_params.get("params_by_profile")
     out: list[float] = []
-    for i, key in enumerate(solar_profiles):
+    for profile_idx, solar_profile_key in enumerate(solar_profiles):
         if by_profile is None:
             overrides: dict[str, Any] = {}
         elif isinstance(by_profile, dict):
-            overrides = (by_profile.get(key) or {}).copy()
-        elif isinstance(by_profile, list) and i < len(by_profile):
-            overrides = (by_profile[i] or {}).copy()
+            overrides = (by_profile.get(solar_profile_key) or {}).copy()
+        elif isinstance(by_profile, list) and profile_idx < len(by_profile):
+            overrides = (by_profile[profile_idx] or {}).copy()
         else:
             overrides = {}
         merged = {**global_params, **overrides}
         explicit = merged.get("existing_capital_recovery_per_kw_year")
         use_marginal = bool(merged.get("use_marginal_capital_for_existing_recovery", False))
-        cap_kw = capital_list[i]
+        cap_kw = capital_list[profile_idx]
         if explicit is not None:
             out.append(float(explicit))
         elif use_marginal:
@@ -96,11 +96,13 @@ def _validate_solar_params(
     solar_profiles: list[str],
     efficiency_list: list[float],
 ) -> None:
-    for i, eff in enumerate(efficiency_list):
-        profile_label = solar_profiles[i] if i < len(solar_profiles) else f"profile index {i}"
-        if eff <= 0 or eff > 1:
+    for profile_idx, efficiency in enumerate(efficiency_list):
+        profile_label = (
+            solar_profiles[profile_idx] if profile_idx < len(solar_profiles) else f"profile index {profile_idx}"
+        )
+        if efficiency <= 0 or efficiency > 1:
             raise ValueError(
-                f"solar_pv: efficiency for {profile_label!r} must be in (0, 1], got {eff}. "
+                f"solar_pv: efficiency for {profile_label!r} must be in (0, 1], got {efficiency}. "
                 "Check technology_parameters['solar_pv'] and params_by_profile."
             )
 

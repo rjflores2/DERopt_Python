@@ -30,15 +30,15 @@ def rate_from_urdb_structure(struct: Any) -> float:
 
 def tier_index_for_tou_demand_charge(dt: Any, demand_charges: dict[str, Any]) -> int:
     """Return demand-charge tier index for ``dt`` using 12×24 weekday/weekend schedules."""
-    wd = demand_charges["demand_charge_weekdayschedule"]
-    we = demand_charges["demand_charge_weekendschedule"]
-    month = dt.month - 1
-    hour = dt.hour
+    weekday_schedule = demand_charges["demand_charge_weekdayschedule"]
+    weekend_schedule = demand_charges["demand_charge_weekendschedule"]
+    month_index = dt.month - 1
+    hour_of_day = dt.hour
     is_weekend = dt.weekday() >= 5
-    sched = we if is_weekend else wd
-    n_tiers = len(demand_charges.get("demand_charge_ratestructure") or [])
-    if month < len(sched) and hour < len(sched[month]):
-        return min(sched[month][hour], max(0, n_tiers - 1))
+    schedule = weekend_schedule if is_weekend else weekday_schedule
+    num_tiers = len(demand_charges.get("demand_charge_ratestructure") or [])
+    if month_index < len(schedule) and hour_of_day < len(schedule[month_index]):
+        return min(schedule[month_index][hour_of_day], max(0, num_tiers - 1))
     return 0
 
 
@@ -48,14 +48,14 @@ def times_by_year_month_from_datetimes(
 ) -> dict[tuple[int, int], list[int]]:
     """Map ``(year, month_index)`` (month_index 0..11) to timestep indices with a valid datetime."""
     out: dict[tuple[int, int], list[int]] = {}
-    for t in time_indices:
-        if t >= len(datetimes):
+    for time_step in time_indices:
+        if time_step >= len(datetimes):
             continue
-        dt = datetimes[t]
+        dt = datetimes[time_step]
         if dt is None:
             continue
         key = (dt.year, dt.month - 1)
-        out.setdefault(key, []).append(t)
+        out.setdefault(key, []).append(time_step)
     return out
 
 
@@ -68,14 +68,14 @@ def sorted_year_month_keys(
 
 def flat_demand_nodes_and_rates_for_month(
     nodes: list[str],
-    rates_by_node: dict[str, Any | None],
+    utility_tariff_by_node: dict[str, Any | None],
     month_index: int,
 ) -> tuple[list[str], dict[str, float]]:
     """Nodes with flat (or both) demand charges applicable in ``month_index``, and their $/kW rates."""
     flat_nodes: list[str] = []
     flat_rate_by_node: dict[str, float] = {}
-    for n in nodes:
-        utility_rate_for_node = rates_by_node.get(n)
+    for node in nodes:
+        utility_rate_for_node = utility_tariff_by_node.get(node)
         demand_charges = (
             getattr(utility_rate_for_node, "demand_charges", None)
             if utility_rate_for_node is not None
@@ -94,18 +94,18 @@ def flat_demand_nodes_and_rates_for_month(
                 struct_idx = int(flat_month_map[month_index])
             except (TypeError, ValueError) as e:
                 raise ValueError(
-                    f"Node {n!r}: flat_demand_charge_months[{month_index}] must be an int structure index; "
+                    f"Node {node!r}: flat_demand_charge_months[{month_index}] must be an int structure index; "
                     f"got {flat_month_map[month_index]!r}"
                 ) from e
         if not isinstance(flat_struct, list) or not flat_struct:
-            raise ValueError(f"Node {n!r}: flat_demand_charge_structure must be a non-empty list")
+            raise ValueError(f"Node {node!r}: flat_demand_charge_structure must be a non-empty list")
         if struct_idx < 0 or struct_idx >= len(flat_struct):
             raise ValueError(
-                f"Node {n!r}: flat_demand_charge_months[{month_index}] selects structure index {struct_idx} out of range "
+                f"Node {node!r}: flat_demand_charge_months[{month_index}] selects structure index {struct_idx} out of range "
                 f"for flat_demand_charge_structure (len={len(flat_struct)})"
             )
-        flat_nodes.append(n)
-        flat_rate_by_node[n] = rate_from_urdb_structure(flat_struct[struct_idx])
+        flat_nodes.append(node)
+        flat_rate_by_node[node] = rate_from_urdb_structure(flat_struct[struct_idx])
     return flat_nodes, flat_rate_by_node
 
 
@@ -123,13 +123,13 @@ def tou_demand_tier_groups_for_month(
     month_times: list[int],
     datetimes: list[Any | None],
     nodes: list[str],
-    rates_by_node: dict[str, Any | None],
+    utility_tariff_by_node: dict[str, Any | None],
 ) -> list[TouDemandTierGroup]:
     """Group ``(node, t)`` by TOU tier for one ``(year, month)``; sorted by tier index."""
     times_by_tier_node: dict[int, dict[str, list[int]]] = {}
     rate_by_tier_node: dict[tuple[int, str], float] = {}
-    for n in nodes:
-        utility_rate_for_node = rates_by_node.get(n)
+    for node in nodes:
+        utility_rate_for_node = utility_tariff_by_node.get(node)
         demand_charges = (
             getattr(utility_rate_for_node, "demand_charges", None)
             if utility_rate_for_node is not None
@@ -137,27 +137,27 @@ def tou_demand_tier_groups_for_month(
         )
         if not demand_charges or demand_charges.get("demand_charge_type") not in ("tou", "both"):
             continue
-        drs = demand_charges.get("demand_charge_ratestructure") or []
-        for t in month_times:
-            if t >= len(datetimes) or datetimes[t] is None:
+        demand_rate_structure = demand_charges.get("demand_charge_ratestructure") or []
+        for time_step in month_times:
+            if time_step >= len(datetimes) or datetimes[time_step] is None:
                 continue
-            ti = tier_index_for_tou_demand_charge(datetimes[t], demand_charges)
-            tier = drs[ti] if ti < len(drs) else {}
-            rate_by_tier_node[(ti, n)] = rate_from_urdb_structure(tier)
-            times_by_tier_node.setdefault(ti, {}).setdefault(n, []).append(t)
+            tier_index = tier_index_for_tou_demand_charge(datetimes[time_step], demand_charges)
+            tier_block = demand_rate_structure[tier_index] if tier_index < len(demand_rate_structure) else {}
+            rate_by_tier_node[(tier_index, node)] = rate_from_urdb_structure(tier_block)
+            times_by_tier_node.setdefault(tier_index, {}).setdefault(node, []).append(time_step)
 
     groups: list[TouDemandTierGroup] = []
-    for ti in sorted(times_by_tier_node.keys()):
-        by_node = times_by_tier_node[ti]
-        tier_nodes = sorted(by_node.keys())
+    for tier_index in sorted(times_by_tier_node.keys()):
+        times_by_node_for_tier = times_by_tier_node[tier_index]
+        tier_nodes = sorted(times_by_node_for_tier.keys())
         if not tier_nodes:
             continue
-        node_rates = {n: rate_by_tier_node[(ti, n)] for n in tier_nodes}
+        node_rates = {n: rate_by_tier_node[(tier_index, n)] for n in tier_nodes}
         groups.append(
             TouDemandTierGroup(
-                tier_index=ti,
+                tier_index=tier_index,
                 tier_nodes=tier_nodes,
-                times_by_node={n: by_node[n] for n in tier_nodes},
+                times_by_node={n: times_by_node_for_tier[n] for n in tier_nodes},
                 rate_by_node=node_rates,
             )
         )

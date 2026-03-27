@@ -15,7 +15,7 @@ class ResolvedUtilityInputs:
     """Everything needed to build ``model.utility`` except Pyomo objects."""
 
     prices_by_node: dict[str, list[float]]
-    rates_by_node: dict[str, Any | None]
+    utility_tariff_by_node: dict[str, Any | None]
     has_any_demand_charges: bool
     dt_hours_f: float | None
     datetimes: list[Any | None]
@@ -25,11 +25,11 @@ class ResolvedUtilityInputs:
 
 
 def demand_charge_type_for_node(
-    rates_by_node: dict[str, Any | None],
+    utility_tariff_by_node: dict[str, Any | None],
     node: str,
 ) -> str | None:
     """Return ``demand_charge_type`` if flat/tou/both; else ``None``."""
-    utility_rate_for_node = rates_by_node.get(node)
+    utility_rate_for_node = utility_tariff_by_node.get(node)
     demand_charges = (
         getattr(utility_rate_for_node, "demand_charges", None)
         if utility_rate_for_node is not None
@@ -57,24 +57,28 @@ def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | Non
         datetimes = [None] * len(time_indices)
 
     prices_by_node: dict[str, list[float]] = {}
-    rates_by_node: dict[str, Any | None] = {}
+    utility_tariff_by_node: dict[str, Any | None] = {}
     zero_prices = [0.0] * len(time_indices)
-    for n in nodes:
-        p = None
+    for node in nodes:
+        import_price_series = None
         if isinstance(import_prices_by_node, dict):
-            p = import_prices_by_node.get(n)
-        if p is not None:
-            prices_by_node[n] = p if len(p) == len(time_indices) else list(p)
+            import_price_series = import_prices_by_node.get(node)
+        if import_price_series is not None:
+            prices_by_node[node] = (
+                import_price_series
+                if len(import_price_series) == len(time_indices)
+                else list(import_price_series)
+            )
         else:
-            prices_by_node[n] = zero_prices
+            prices_by_node[node] = zero_prices
 
-        r = None
+        parsed_tariff = None
         if isinstance(utility_rate_by_node, dict):
-            r = utility_rate_by_node.get(n)
-        rates_by_node[n] = r
+            parsed_tariff = utility_rate_by_node.get(node)
+        utility_tariff_by_node[node] = parsed_tariff
 
     has_any_demand_charges = any(
-        demand_charge_type_for_node(rates_by_node, n) is not None for n in nodes
+        demand_charge_type_for_node(utility_tariff_by_node, node) is not None for node in nodes
     )
     dt_hours_f: float | None = None
     if has_any_demand_charges:
@@ -104,10 +108,12 @@ def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | Non
 
     fixed_usd = sum(
         fixed_customer_charges_horizon_usd(
-            getattr(rates_by_node[n], "customer_fixed_charges", None) if rates_by_node[n] is not None else None,
+            getattr(utility_tariff_by_node[node], "customer_fixed_charges", None)
+            if utility_tariff_by_node[node] is not None
+            else None,
             datetimes,
         )
-        for n in nodes
+        for node in nodes
     )
 
     has_node_energy_prices = isinstance(import_prices_by_node, dict) and bool(import_prices_by_node)
@@ -117,7 +123,7 @@ def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | Non
 
     return ResolvedUtilityInputs(
         prices_by_node=prices_by_node,
-        rates_by_node=rates_by_node,
+        utility_tariff_by_node=utility_tariff_by_node,
         has_any_demand_charges=has_any_demand_charges,
         dt_hours_f=dt_hours_f,
         datetimes=datetimes,
