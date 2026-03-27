@@ -183,11 +183,22 @@ def add_solar_pv_block(
                 )
 
             # Objective: decision-relevant terms only (adopted capacity and adopted O&M).
-            b.objective_contribution = sum(
-                b.capital_cost_per_kw[p] * b.solar_capacity_adopted[n, p] * r.amortization_factor
-                + b.om_per_kw_year[p] * b.solar_capacity_adopted[n, p]
-                for i, p in enumerate(b.SOLAR)
-                for n in NODES
+            b.solar_capital_costs = pyo.Expression(
+                expr=sum(
+                    b.capital_cost_per_kw[p] * b.solar_capacity_adopted[n, p] * r.amortization_factor
+                    for i, p in enumerate(b.SOLAR)
+                    for n in NODES
+                )
+            )
+            b.solar_fixed_operations_and_maintenance = pyo.Expression(
+                expr=sum(
+                    b.om_per_kw_year[p] * b.solar_capacity_adopted[n, p]
+                    for i, p in enumerate(b.SOLAR)
+                    for n in NODES
+                )
+            )
+            b.objective_contribution = pyo.Expression(
+                expr=b.solar_capital_costs + b.solar_fixed_operations_and_maintenance
             )
             # Reporting-only existing/background annual costs.
             b.cost_non_optimizing_annual = pyo.Expression(
@@ -207,6 +218,8 @@ def add_solar_pv_block(
             b.generation_limits = pyo.Constraint(NODES, b.SOLAR, T, rule=generation_limits_rule_existing_only)
 
             # No decision-dependent cost in existing-only mode.
+            b.solar_capital_costs = pyo.Expression(expr=0.0)
+            b.solar_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
             b.objective_contribution = pyo.Expression(expr=0.0)
             b.cost_non_optimizing_annual = pyo.Expression(
                 expr=sum(

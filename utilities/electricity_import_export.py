@@ -94,8 +94,10 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
 
     # Check if any node has demand charges.
     def _demand_type_for_node(node: str) -> str | None:
-        dc = getattr(rates_by_node[node], "demand_charges", None) if rates_by_node[node] is not None else None
-        demand_charge_type = dc.get("demand_charge_type") if isinstance(dc, dict) else None
+        demand_charges = (
+            getattr(rates_by_node[node], "demand_charges", None) if rates_by_node[node] is not None else None
+        )
+        demand_charge_type = demand_charges.get("demand_charge_type") if isinstance(demand_charges, dict) else None
         if demand_charge_type in ("flat", "tou", "both"):
             return demand_charge_type
         return None
@@ -149,6 +151,7 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
         return re.sub(r"[^0-9A-Za-z_]+", "_", x)
 
     def block_rule(b): #Pyomo block 
+        # Grid import variable (kWh/period)
         b.grid_import = pyo.Var(NODES, T, within=pyo.NonNegativeReals) # Grid import variable (kWh/period)
         # Power proxy for demand charges: kWh/period ÷ (h/period) = kW.
         if has_any_demand_charges:
@@ -159,11 +162,13 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
                 T,
                 rule=lambda m, n, t: m.grid_import[n, t] / dt_hours_f,
             )
+            # Electricity source term for core electricity balance.
         b.electricity_source_term = pyo.Expression( # Contribution to electricity sources - ``electricity_source_term[node, t]``
             NODES, T,
             rule=lambda m, n, t: m.grid_import[n, t],
         )
-        b.import_price = pyo.Param(
+        # Node-specific import price ($/kWh) for each time period
+        b.import_price = pyo.Param( 
             NODES,
             T,
             initialize={(n, t): float(prices_by_node[n][t]) for n in NODES for t in T},
@@ -175,72 +180,89 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
         flat_demand_charge_terms = []
         tou_demand_charge_terms = []
 
-        # Create one set of demand-charge peak constraints per year-month occurrence.
-        year_months_in_run = sorted({(dt.year, dt.month - 1) for dt in datetimes if dt is not None})
+        # Pre-index timesteps by (year, month_index) once and reuse for flat + TOU loops.
+        times_by_year_month: dict[tuple[int, int], list[int]] = {}
+        for t in _T:
+            dt = datetimes[t]
+            if dt is None:
+                continue
+            key = (dt.year, dt.month - 1)
+            times_by_year_month.setdefault(key, []).append(t)
+        year_months_in_run = sorted(times_by_year_month.keys())
 
         # Flat demand charge: per-node, only for nodes whose tariff has flat (or both).
-        for yy, mi in year_months_in_run:
-            times_in_month = [t for t in _T if datetimes[t] is not None and datetimes[t].year == yy and datetimes[t].month - 1 == mi]
+        for yy, month_index in year_months_in_run:
+            times_in_month = times_by_year_month[(yy, month_index)]
             if not times_in_month:
                 continue
             flat_nodes: list[str] = []
             flat_rate_by_node: dict[str, float] = {}
             for n in NODES:
-                ur_n = rates_by_node[n]
-                dc = getattr(ur_n, "demand_charges", None) if ur_n is not None else None
-                if not dc or dc.get("demand_charge_type") not in ("flat", "both"):
+                utility_rate_for_node = rates_by_node[n]
+                demand_charges = (
+                    getattr(utility_rate_for_node, "demand_charges", None)
+                    if utility_rate_for_node is not None
+                    else None
+                )
+                if not demand_charges or demand_charges.get("demand_charge_type") not in ("flat", "both"):
                     continue
-                applicable = set(dc.get("flat_demand_charge_applicable_months") or [])
-                if applicable and mi not in applicable:
+                applicable = set(demand_charges.get("flat_demand_charge_applicable_months") or [])
+                if applicable and month_index not in applicable:
                     continue
-                flat_struct = dc.get("flat_demand_charge_structure") or [[]]
-                flat_month_map = dc.get("flat_demand_charge_months") or []
+                flat_struct = demand_charges.get("flat_demand_charge_structure") or [[]]
+                flat_month_map = demand_charges.get("flat_demand_charge_months") or []
                 struct_idx = 0
-                if mi < len(flat_month_map):
+                if month_index < len(flat_month_map):
                     try:
-                        struct_idx = int(flat_month_map[mi])
+                        struct_idx = int(flat_month_map[month_index])
                     except (TypeError, ValueError) as e:
                         raise ValueError(
-                            f"Node {n!r}: flat_demand_charge_months[{mi}] must be an int structure index; got {flat_month_map[mi]!r}"
+                            f"Node {n!r}: flat_demand_charge_months[{month_index}] must be an int structure index; got {flat_month_map[month_index]!r}"
                         ) from e
                 if not isinstance(flat_struct, list) or not flat_struct:
                     raise ValueError(f"Node {n!r}: flat_demand_charge_structure must be a non-empty list")
                 if struct_idx < 0 or struct_idx >= len(flat_struct):
                     raise ValueError(
-                        f"Node {n!r}: flat_demand_charge_months[{mi}] selects structure index {struct_idx} out of range "
+                        f"Node {n!r}: flat_demand_charge_months[{month_index}] selects structure index {struct_idx} out of range "
                         f"for flat_demand_charge_structure (len={len(flat_struct)})"
                     )
                 flat_nodes.append(n)
                 flat_rate_by_node[n] = _rate_from_urdb_structure(flat_struct[struct_idx])
             if flat_nodes:
                 P_flat = pyo.Var(flat_nodes, within=pyo.NonNegativeReals)
-                b.add_component(f"P_flat_y{yy}_m{mi}", P_flat)
-                for t in times_in_month:
-                    b.add_component(
-                        f"flat_demand_charge_ub_y{yy}_m{mi}_t{t}",
-                        pyo.Constraint(
-                            flat_nodes,
-                            rule=lambda _b, n, _t=t: P_flat[n] >= _b.grid_import_power_kw[n, _t],
-                        ),
-                    )
+                b.add_component(f"P_flat_y{yy}_m{month_index}", P_flat)
+                month_time_index_set = pyo.Set(initialize=times_in_month, ordered=True)
+                b.add_component(f"flat_demand_time_index_y{yy}_m{month_index}", month_time_index_set)
+                b.add_component(
+                    f"flat_demand_charge_ub_y{yy}_m{month_index}",
+                    pyo.Constraint(
+                        flat_nodes,
+                        month_time_index_set,
+                        rule=lambda _b, n, time_index: P_flat[n] >= _b.grid_import_power_kw[n, time_index],
+                    ),
+                )
                 flat_demand_charge_terms.append(sum(flat_rate_by_node[n] * P_flat[n] for n in flat_nodes))
 
         # TOU demand charge: per-node, only for nodes whose tariff has tou (or both).
-        for yy, mi in year_months_in_run:
-            month_times = [t for t in _T if datetimes[t] is not None and datetimes[t].year == yy and datetimes[t].month - 1 == mi]
+        for yy, month_index in year_months_in_run:
+            month_times = times_by_year_month[(yy, month_index)]
             if not month_times:
                 continue
             # Group node/timestep by TOU tier.
             times_by_tier_node: dict[int, dict[str, list[int]]] = {}
             rate_by_tier_node: dict[tuple[int, str], float] = {}
             for n in NODES:
-                ur_n = rates_by_node[n]
-                dc = getattr(ur_n, "demand_charges", None) if ur_n is not None else None
-                if not dc or dc.get("demand_charge_type") not in ("tou", "both"):
+                utility_rate_for_node = rates_by_node[n]
+                demand_charges = (
+                    getattr(utility_rate_for_node, "demand_charges", None)
+                    if utility_rate_for_node is not None
+                    else None
+                )
+                if not demand_charges or demand_charges.get("demand_charge_type") not in ("tou", "both"):
                     continue
-                drs = dc.get("demand_charge_ratestructure") or []
+                drs = demand_charges.get("demand_charge_ratestructure") or []
                 for t in month_times:
-                    ti = _tier_for_tou_demand_charge(datetimes[t], dc)
+                    ti = _tier_for_tou_demand_charge(datetimes[t], demand_charges)
                     tier = drs[ti] if ti < len(drs) else {}
                     rate_by_tier_node[(ti, n)] = _rate_from_urdb_structure(tier)
                     times_by_tier_node.setdefault(ti, {}).setdefault(n, []).append(t)
@@ -249,13 +271,20 @@ def _add_utility_block(model: Any, data: Any) -> pyo.Block | None:
                 if not tier_nodes:
                     continue
                 P_tou = pyo.Var(tier_nodes, within=pyo.NonNegativeReals)
-                b.add_component(f"P_tou_y{yy}_m{mi}_tier{ti}", P_tou)
-                for n in tier_nodes:
-                    for t in by_node[n]:
-                        b.add_component(
-                            f"tou_demand_charge_ub_y{yy}_m{mi}_tier{ti}_n{_tok(n)}_t{t}",
-                            pyo.Constraint(expr=P_tou[n] >= b.grid_import_power_kw[n, t]),
-                        )
+                b.add_component(f"P_tou_y{yy}_m{month_index}_tier{ti}", P_tou)
+                tier_node_time_index = sorted((n, t) for n in tier_nodes for t in by_node[n])
+                tier_node_time_index_set = pyo.Set(dimen=2, initialize=tier_node_time_index, ordered=True)
+                b.add_component(
+                    f"tou_demand_node_time_index_y{yy}_m{month_index}_tier{ti}",
+                    tier_node_time_index_set,
+                )
+                b.add_component(
+                    f"tou_demand_charge_ub_y{yy}_m{month_index}_tier{ti}",
+                    pyo.Constraint(
+                        tier_node_time_index_set,
+                        rule=lambda _b, n, time_index: P_tou[n] >= _b.grid_import_power_kw[n, time_index],
+                    ),
+                )
                 tou_demand_charge_terms.append(sum(rate_by_tier_node[(ti, n)] * P_tou[n] for n in tier_nodes))
 
         # Expose demand-charge components separately for reporting; names match common rate language.
