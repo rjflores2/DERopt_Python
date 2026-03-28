@@ -168,66 +168,66 @@ def add_utility_block(model: Any, data: Any) -> pyo.Block | None:
             month_times = times_by_year_month[(calendar_year, month_index)] #Pulling the times in the month for the [year month]
             if not month_times: #if there are no TOU demand charges in this month, continue to the next [year month]
                 continue
-            for group in tou_demand_tier_groups_for_month( 
+            for group in tou_demand_tier_groups_for_month( # In each year/month combo, go through the different TOU demand charge tiers
                 month_times, datetimes, NODES, utility_tariff_by_node
             ):
-                tier_index = group.tier_index
-                tier_nodes = group.tier_nodes
+                tier_index = group.tier_index #Pulling the demand charge tier index from the group
+                tier_nodes = group.tier_nodes #Pulling the nodes in the demand charge tier from the group
                 # OpenEI often uses $/kW == 0 for a tier or period meaning no demand charge there — skip vars/constraints.
-                tier_nodes_billed = [
+                tier_nodes_billed = [ #Pulling the nodes in the tier that have a demand charge
                     node for node in tier_nodes if float(group.rate_by_node.get(node, 0.0)) > 0.0
                 ]
-                if not tier_nodes_billed:
+                if not tier_nodes_billed: #If there are no nodes in the tier that have a demand charge, continue to the next tier
                     continue
-                tou_demand_peak_kw = pyo.Var(tier_nodes_billed, within=pyo.NonNegativeReals)
-                utility_block.add_component(
+                tou_demand_peak_kw = pyo.Var(tier_nodes_billed, within=pyo.NonNegativeReals) #Pyomo variable for TOU demand peak - kW at each node in the tier
+                utility_block.add_component( #Adding pyomo TOU deamnd charge variable - name is P_tou_y{calendar_year}_m{month_index}_tier{tier_index}, e.g. P_tou_y2026_m3_tier1 for March 2026 tier 1 (tier # is defined by the OpenEI data)
                     f"P_tou_y{calendar_year}_m{month_index}_tier{tier_index}", tou_demand_peak_kw
                 )
-                tier_node_time_index = sorted(
+                tier_node_time_index = sorted( #Sorting the nodes and time steps in the tier
                     (node, time_step)
                     for node in tier_nodes_billed
                     for time_step in group.times_by_node[node]
                 )
-                tier_node_time_index_set = pyo.Set(dimen=2, initialize=tier_node_time_index, ordered=True)
-                utility_block.add_component(
+                tier_node_time_index_set = pyo.Set(dimen=2, initialize=tier_node_time_index, ordered=True) #Pyomo set for the nodes and time steps in the tier
+                utility_block.add_component( #Adding pyomo TOU deamnd charge constraint - name is tou_demand_node_time_index_y{calendar_year}_m{month_index}_tier{tier_index}, e.g. tou_demand_node_time_index_y2026_m3_tier1 for March 2026 tier 1 (tier # is defined by the OpenEI data)
                     f"tou_demand_node_time_index_y{calendar_year}_m{month_index}_tier{tier_index}",
                     tier_node_time_index_set,
                 )
-                utility_block.add_component(
+                utility_block.add_component( #Adding pyomo TOU deamnd charge upper bound constraint - name is tou_demand_charge_ub_y{calendar_year}_m{month_index}_tier{tier_index}, e.g. tou_demand_charge_ub_y2026_m3_tier1 for March 2026 tier 1 (tier # is defined by the OpenEI data)
                     f"tou_demand_charge_ub_y{calendar_year}_m{month_index}_tier{tier_index}",
-                    pyo.Constraint(
+                    pyo.Constraint( #Pyomo constraint for the TOU demand charge upper bound - TOU demand peak >= grid import during billing period for each node and time step in the tier
                         tier_node_time_index_set,
                         rule=lambda _blk, node, time_index: tou_demand_peak_kw[node]
                         >= _blk.grid_import_power_kw[node, time_index],
                     ),
                 )
-                tou_demand_charge_terms.append(
+                tou_demand_charge_terms.append( #Adding the TOU demand charge for this billing period to the cost - the term is the rate * TOU demand peak
                     sum(
                         group.rate_by_node[node] * tou_demand_peak_kw[node]
                         for node in tier_nodes_billed
                     )
                 )
 
-        utility_block.nonTOU_Demand_Charge_Cost = pyo.Expression(
+        utility_block.nonTOU_Demand_Charge_Cost = pyo.Expression( #Pyomo expression for non-TOU demand charge cost - the sum of the flat demand charge terms
             expr=sum(flat_demand_charge_terms) if flat_demand_charge_terms else 0.0
         )
-        utility_block.TOU_Demand_Charge_Cost = pyo.Expression(
+        utility_block.TOU_Demand_Charge_Cost = pyo.Expression( #Pyomo expression for TOU demand charge cost - the sum of the TOU demand charge terms
             expr=sum(tou_demand_charge_terms) if tou_demand_charge_terms else 0.0
         )
 
         # --- Optimizing objective: energy + demand (fixed fees are reported separately) ---
-        utility_block.objective_contribution = (
+        utility_block.objective_contribution = ( #Pyomo expression for the objective contribution - energy import cost + non-TOU demand charge cost + TOU demand charge cost
             utility_block.energy_import_cost
             + utility_block.nonTOU_Demand_Charge_Cost
             + utility_block.TOU_Demand_Charge_Cost
         )
         # --- Fixed customer charges (USD over horizon; non-optimizing / reporting) ---
-        utility_block.cost_non_optimizing_annual = pyo.Expression(expr=fixed_usd)
+        utility_block.cost_non_optimizing_annual = pyo.Expression(expr=fixed_usd) #Pyomo expression for the fixed customer charges - the fixed customer charges in USD over the represented horizon
 
-    model.utility = pyo.Block(rule=block_rule)
-    return model.utility
+    model.utility = pyo.Block(rule=block_rule) #Adding the utility block to the model
+    return model.utility #Returning the utility block
 
 
 def register(model: Any, data: Any) -> pyo.Block | None:
-    """Registry hook used by ``model.core``."""
-    return add_utility_block(model, data)
+    """Registry hook used by ``model.core``.""" #This is a hook used by the model.core to add the utility block to the model
+    return add_utility_block(model, data) #Returning the utility block
