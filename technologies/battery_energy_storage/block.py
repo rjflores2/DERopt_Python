@@ -6,7 +6,7 @@ Battery is modeled per node and per time step with:
 - Separate charging and discharging power variables at each node and time.
 - An energy balance that links state of charge across time steps.
 - Power limits that scale with installed energy capacity (C-rates).
-- An energy-capacity limit (existing + adopted capacity) at each node.
+- SOC kept between configurable fractions of total capacity (existing + adopted) at each node.
 
 The block contributes to the system electricity balance via:
 - electricity_source_term[node, t] (discharging adds to sources),
@@ -35,46 +35,53 @@ def add_battery_energy_storage_block(
     per optimization period). Storage power is in kW; state of charge in kWh.
 
     1. Data and other inputs
+       - ``data.static["electricity_load_keys"]`` -> ordered Python list of node keys
        - ``model.T`` -> time periods from ``model.core``
-       - ``model.NODES`` -> node keys matching ``electricity_load_keys``
        - ``battery_params`` -> user options merged with defaults
        - ``financials`` -> used to annualize capital on adopted kWh capacity
 
-    2. Parameters (Pyomo ``Param``)
-       - ``capital_cost_per_kwh`` -> resolved $/kWh (one-time capital; annualized in objective)
-       - ``om_per_kwh_year`` -> resolved fixed O&M ($/kWh-year)
+    2. Sets (Pyomo ``Set``)
+       - ``model.T`` -> time index used by the Battery block
+       - ``model.NODES`` -> node index used by the Battery block
 
     3. Variables (Pyomo ``Var``)
-       - ``energy_state[node, t]`` -> state of charge (kWh)
+       - ``state_of_charge[node, t]`` -> stored energy / state of charge (kWh)
        - ``charge_power[node, t]`` -> charging power (kW)
        - ``discharge_power[node, t]`` -> discharging power (kW)
        - ``energy_capacity_adopted[node]`` -> incremental storage energy capacity (kWh)
 
-    4. Other named components on the block
+    4. Parameters (Pyomo ``Param``)
+       - ``capital_cost_per_kwh`` -> resolved $/kWh (one-time capital; annualized in objective)
+       - ``om_per_kwh_year`` -> resolved fixed O&M ($/kWh-year)
+
+    5. Other named components on the block
        - ``total_energy_capacity[node]`` -> existing + adopted kWh, or existing only
 
-    5. Contribution to electricity sources and sinks
+    6. Contribution to electricity sources and sinks
        - ``electricity_source_term[node, t]`` -> discharge power
        - ``electricity_sink_term[node, t]`` -> charge power
 
-    6. Contribution to the cost function
+    7. Contribution to the cost function
        - ``battery_capital_costs`` / ``battery_fixed_operations_and_maintenance`` (adopted kWh)
        - ``objective_contribution`` -> sum of those when adoption is enabled
        - reporting-only existing O&M in ``cost_non_optimizing_annual``
 
-    7. Constraints
-       - ``energy_capacity_limit`` -> ``energy_state <= total_energy_capacity``
+    8. Constraints
+       - ``state_of_charge_minimum`` -> ``state_of_charge >= minimum_state_of_charge * total_energy_capacity``
+       - ``state_of_charge_maximum`` -> ``state_of_charge <= maximum_state_of_charge * total_energy_capacity``
        - ``charge_power_limit`` / ``discharge_power_limit`` -> power ``<=`` C-rate times capacity
        - ``energy_balance`` -> SOC update across the horizon
        - ``initial_soc`` -> optional first-period SOC anchor
     """
-    T = model.T
-    nodes = list(model.NODES)
-    horizon = list(T)
+    T = model.T # Time index from model.core
+    nodes = list(model.NODES) # Node index from model.core
+    horizon = list(T) 
     # O(1) predecessor lookup for energy balance (avoid horizon.index(t) in constraint rules).
     time_index = {t: i for i, t in enumerate(horizon)}
 
+    #Checking if adoption is allowed - if yes, then we will build the block and enable adoptiong
     allow_adoption = (battery_params or {}).get("allow_adoption", True)
+    #Determine which battery parameters to use
     resolved = resolve_battery_block_inputs(
         battery_params=battery_params,
         financials=financials,
@@ -82,21 +89,26 @@ def add_battery_energy_storage_block(
     )
 
     def block_rule(battery_block):
+        # Battery capital cost $/kWh
         battery_block.capital_cost_per_kwh = pyo.Param(
             initialize=resolved.capital_cost_per_kwh,
             within=pyo.Reals,
             mutable=True,
         )
+        # BatteryO&M cost $/kWh
         battery_block.om_per_kwh_year = pyo.Param(
             initialize=resolved.om_per_kwh_year,
             within=pyo.Reals,
             mutable=True,
         )
 
-        battery_block.energy_state = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
-        battery_block.charge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
-        battery_block.discharge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
+        battery_block.state_of_charge = pyo.Var(nodes, T, within=pyo.NonNegativeReals) #Battery SOC
+        battery_block.charge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals) # Battery Charging
+        battery_block.discharge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals) # Batery Discahrging
 
+        ### If adoption is allowed, then include the adoption variable
+        ### Both logical statements resolve potential existing battery 
+        ### storage capacity for use in the model constraints
         if allow_adoption:
             battery_block.energy_capacity_adopted = pyo.Var(nodes, within=pyo.NonNegativeReals)
 
@@ -106,12 +118,28 @@ def add_battery_energy_storage_block(
             def total_energy_capacity(m, node):
                 return resolved.existing_energy_capacity[node]
 
+        ### Formalizing the battery total energy capacity as a pyomo expresion
         battery_block.total_energy_capacity = pyo.Expression(nodes, rule=total_energy_capacity)
 
-        def energy_capacity_limit_rule(m, node, t):
-            return m.energy_state[node, t] <= m.total_energy_capacity[node]
+        # Usable SOC window (fraction of total kWh capacity: existing + adopted at each node).
+        def state_of_charge_minimum_rule(m, node, t):
+            return (
+                m.state_of_charge[node, t]
+                >= resolved.minimum_state_of_charge * m.total_energy_capacity[node]
+            )
 
-        battery_block.energy_capacity_limit = pyo.Constraint(nodes, T, rule=energy_capacity_limit_rule)
+        def state_of_charge_maximum_rule(m, node, t):
+            return (
+                m.state_of_charge[node, t]
+                <= resolved.maximum_state_of_charge * m.total_energy_capacity[node]
+            )
+
+        battery_block.state_of_charge_minimum = pyo.Constraint(
+            nodes, T, rule=state_of_charge_minimum_rule
+        )
+        battery_block.state_of_charge_maximum = pyo.Constraint(
+            nodes, T, rule=state_of_charge_maximum_rule
+        )
 
         def charge_power_limit_rule(m, node, t):
             return m.charge_power[node, t] <= (
@@ -129,8 +157,9 @@ def add_battery_energy_storage_block(
         def energy_balance_rule(m, node, t):
             time_step_index = time_index[t]
             previous_time_step = horizon[-1] if time_step_index == 0 else horizon[time_step_index - 1]
-            return m.energy_state[node, t] == (
-                m.energy_state[node, previous_time_step]
+            return m.state_of_charge[node, t] == (
+                # Stored energy naturally decays each timestep by the retention factor.
+                resolved.state_of_charge_retention * m.state_of_charge[node, previous_time_step]
                 + resolved.charge_efficiency * m.charge_power[node, t]
                 - (1.0 / resolved.discharge_efficiency) * m.discharge_power[node, t]
             )
@@ -141,7 +170,7 @@ def add_battery_energy_storage_block(
             first_time_step = horizon[0]
 
             def initial_soc_rule(m, node):
-                return m.energy_state[node, first_time_step] == (
+                return m.state_of_charge[node, first_time_step] == (
                     resolved.initial_soc_fraction * m.total_energy_capacity[node]
                 )
 
