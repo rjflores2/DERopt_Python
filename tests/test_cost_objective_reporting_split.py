@@ -36,6 +36,7 @@ def test_utility_fixed_charge_excluded_from_objective_kept_for_reporting():
         name="Y",
         customer_fixed_charges={"first_meter": {"amount": 10.0, "units": "$/day"}},
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
     m = build_model(data, technology_parameters={}, financials={})
     # Keep unsolved expression evaluation stable.
     m.utility.grid_import["electricity_load__x", 0].value = 0.0
@@ -85,6 +86,7 @@ def test_fixed_background_only_case_reports_total_even_with_zero_objective():
         name="Y",
         customer_fixed_charges={"first_meter": {"amount": 10.0, "units": "$/day"}},
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
     tech = {
         "solar_pv": {
             "allow_adoption": False,

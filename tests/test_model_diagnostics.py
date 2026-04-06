@@ -9,8 +9,8 @@ def test_time_subset_triggers_horizon_warning():
     data = SimpleNamespace(
         indices={"time": list(range(24))},
         static={"time_subset_applied": {"reason": "test"}, "time_step_hours": 1.0},
-        import_prices=None,
-        utility_rate=None,
+        import_prices_by_node=None,
+        utility_rate_by_node=None,
     )
     model = SimpleNamespace()
     w = collect_model_diagnostics(model, data, None)
@@ -21,8 +21,8 @@ def test_short_horizon_warning():
     data = SimpleNamespace(
         indices={"time": list(range(100))},
         static={"time_step_hours": 1.0},
-        import_prices=None,
-        utility_rate=None,
+        import_prices_by_node=None,
+        utility_rate_by_node=None,
     )
     w = collect_model_diagnostics(SimpleNamespace(), data, None)
     assert any("full year" in x.lower() for x in w)
@@ -31,9 +31,9 @@ def test_short_horizon_warning():
 def test_negative_import_prices_warning_includes_min():
     data = SimpleNamespace(
         indices={"time": [0]},
-        static={},
-        import_prices=[0.1, -0.02],
-        utility_rate=None,
+        static={"electricity_load_keys": ["n1"]},
+        import_prices_by_node={"n1": [0.1, -0.02]},
+        utility_rate_by_node=None,
     )
     w = collect_model_diagnostics(SimpleNamespace(), data, None)
     assert any("negative" in x.lower() and "-0.02" in x for x in w)
@@ -54,9 +54,9 @@ def test_print_model_diagnostics_format(capsys):
 def test_collect_returns_list():
     data = SimpleNamespace(
         indices={"time": [0]},
-        static={},
-        import_prices=[0.1],
-        utility_rate=None,
+        static={"electricity_load_keys": ["n1"]},
+        import_prices_by_node={"n1": [0.1]},
+        utility_rate_by_node=None,
     )
     w = collect_model_diagnostics(SimpleNamespace(), data, None)
     assert isinstance(w, list)

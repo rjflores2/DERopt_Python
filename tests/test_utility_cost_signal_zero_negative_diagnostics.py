@@ -21,7 +21,6 @@ def _base_data(*, import_prices, demand_charges=None, customer_fixed_charges=Non
             "datetime": [datetime(2026, 1, 1)],
         },
         static={"electricity_load_keys": ["electricity_load__x"]},
-        import_prices=import_prices,
     )
 
     data.utility_rate = ParsedRate(
@@ -31,6 +30,9 @@ def _base_data(*, import_prices, demand_charges=None, customer_fixed_charges=Non
         demand_charges=demand_charges,
         customer_fixed_charges=customer_fixed_charges,
     )
+    node = "electricity_load__x"
+    data.utility_rate_by_node = {node: data.utility_rate}
+    data.import_prices_by_node = {node: (list(import_prices) if import_prices is not None else [0.0])}
     return data
 
 

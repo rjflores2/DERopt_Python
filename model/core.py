@@ -53,19 +53,9 @@ def build_model(
                 f"data.timeseries[{node!r}] length {len(series)} != time steps {n_time}"
             )
 
+    # Utility inputs are canonicalized upstream as node-scoped maps.
     import_prices_by_node = getattr(data, "import_prices_by_node", None)
     utility_rate_by_node = getattr(data, "utility_rate_by_node", None)
-    # Normalize any single-tariff data into node-scoped maps so downstream utility
-    # code only needs one data shape.
-    import_prices = getattr(data, "import_prices", None)
-    utility_rate = getattr(data, "utility_rate", None)
-    if import_prices is not None and len(import_prices) != n_time:
-        raise ValueError(f"data.import_prices length {len(import_prices)} != time steps {n_time}")
-    if import_prices_by_node is None and import_prices is not None:
-        # Use separate list objects per node to avoid accidental cross-node mutation.
-        import_prices_by_node = {n: list(import_prices) for n in load_keys}
-    if utility_rate_by_node is None and utility_rate is not None:
-        utility_rate_by_node = {n: utility_rate for n in load_keys}
     if import_prices_by_node is not None:
         for n, series in import_prices_by_node.items():
             if n not in load_keys:
@@ -78,7 +68,7 @@ def build_model(
         for n in utility_rate_by_node:
             if n not in load_keys:
                 raise ValueError(f"data.utility_rate_by_node contains unknown node {n!r}")
-    # Node-scoped utility inputs (prices and parsed rates).
+    #  Assigning the import prices and utility rate to the model
     model.import_prices_by_node = import_prices_by_node
     model.utility_rate_by_node = utility_rate_by_node
 
@@ -89,9 +79,9 @@ def build_model(
 
     tech_params = technology_parameters or {}
     fin = financials or {}
-    for key, register_fn in REGISTRY:
+    for technology_name, register_fn in REGISTRY:
         # Skip techs not listed in config or explicitly set to None.
-        if tech_params.get(key) is None:
+        if tech_params.get(technology_name) is None:
             continue
         register_fn(
             model,
@@ -147,10 +137,12 @@ def build_model(
     model.electricity_sinks = pyo.Expression(model.NODES, model.T, rule=_sinks_rule)
 
     # Balance constraint: sources must equal sinks at each (node, t).
-    def _balance_rule(m, n, t):
+    def _electricity_energy_balance_rule(m, n, t):
         return m.electricity_sources[n, t] == m.electricity_sinks[n, t]
 
-    model.electricity_balance = pyo.Constraint(model.NODES, model.T, rule=_balance_rule)
+    model.electricity_balance = pyo.Constraint(
+        model.NODES, model.T, rule=_electricity_energy_balance_rule
+    )
 
     # -------------------------------------------------------------------------
     # Objective: minimize total cost (sum of objective_contribution from all
@@ -168,6 +160,7 @@ def build_model(
     # -------------------------------------------------------------------------
     # Reporting cost buckets (not used by optimizer unless included in objective_contribution).
     # Keep constant / non-optimizing costs visible for post-processing.
+    # These represent fixed costs that don't affect optimizaiton results but could affect reporting.
     # -------------------------------------------------------------------------
     def _cost_non_optimizing_rule(m):
         total = 0.0

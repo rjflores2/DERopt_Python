@@ -45,6 +45,7 @@ def test_flat_demand_creates_month_peaks_only_for_months_in_run_and_uses_month_r
             "flat_demand_charge_applicable_months": list(range(12)),
         },
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
 
     m = build_model(data, technology_parameters={}, financials={})
     assert hasattr(m, "utility")
@@ -86,6 +87,7 @@ def test_flat_demand_multiyear_creates_separate_year_month_peaks():
             "flat_demand_charge_applicable_months": list(range(12)),
         },
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
 
     m = build_model(data, technology_parameters={}, financials={})
     assert hasattr(m.utility, "P_flat_y2024_m0")
@@ -140,6 +142,7 @@ def test_tou_demand_creates_month_tier_peaks_only_when_tier_occurs_in_month():
             "demand_charge_weekendschedule": we,
         },
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
 
     m = build_model(data, technology_parameters={}, financials={})
     assert hasattr(m, "utility")
@@ -184,6 +187,7 @@ def test_tou_demand_charge_cost_sums_month_tier_peaks():
             "demand_charge_weekendschedule": we,
         },
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
     m = build_model(data, technology_parameters={}, financials={})
     # Set peak variables directly; cost expression should be sum(rate * P) over created (month,tier) vars.
     m.utility.P_tou_y2024_m0_tier1["electricity_load__x"].value = 5.0
@@ -218,6 +222,7 @@ def test_tou_demand_multiyear_creates_separate_year_month_peaks():
             "demand_charge_weekendschedule": we,
         },
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
 
     m = build_model(data, technology_parameters={}, financials={})
     assert hasattr(m.utility, "P_tou_y2024_m0_tier0")
@@ -250,6 +255,7 @@ def test_subhourly_demand_charge_uses_power_conversion():
             "flat_demand_charge_applicable_months": [0],
         },
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
     m = build_model(data, technology_parameters={}, financials={})
     m.utility.grid_import["electricity_load__x", 0].value = 25.0
     m.utility.P_flat_y2024_m0["electricity_load__x"].value = 0.0

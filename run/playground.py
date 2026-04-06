@@ -104,10 +104,15 @@ def main() -> int:
     print(f"Rows loaded: {time_count}")
     print(f"First electricity load (kWh): {data.timeseries[first_load_key][0]:.5f} (key: {first_load_key})")
     print(f"Solar loaded: {'solar_production_keys' in data.static}")
-    ur = data.utility_rate
-    print(f"Utility rate loaded: {ur is not None}" + (f" ({ur.rate_type}, {ur.name[:40]}...)" if ur else ""))
-    ip = data.import_prices
-    print(f"Import price vector: {'yes' if ip else 'no'}" + (f" (len={len(ip)})" if ip else ""))
+    ur_by_node = getattr(data, "utility_rate_by_node", None) or {}
+    has_utility_rate = any(ur is not None for ur in ur_by_node.values())
+    print(f"Utility rate loaded (any node): {has_utility_rate}")
+    ip_by_node = getattr(data, "import_prices_by_node", None) or {}
+    sample_price_len = len(next(iter(ip_by_node.values()))) if ip_by_node else 0
+    print(
+        f"Import price vectors by node: {'yes' if ip_by_node else 'no'}"
+        + (f" (nodes={len(ip_by_node)}, periods={sample_price_len})" if ip_by_node else "")
+    )
     print(f"Model built: True (solar_pv block: {hasattr(model, 'solar_pv')})")
     print(f"Total elapsed: {time.perf_counter() - t0:.1f}s")
     return 0

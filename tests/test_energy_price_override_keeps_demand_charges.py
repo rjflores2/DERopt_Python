@@ -74,9 +74,11 @@ def test_raw_energy_prices_override_openei_energy_keep_demand_charges(monkeypatc
     case_cfg.utility_rate_path.write_text("{}", encoding="utf-8")
 
     data = brd.build_run_data(tmp_path, case_cfg)
-    assert data.import_prices == [0.123]
-    assert data.utility_rate is not None
-    assert data.utility_rate.demand_charges is not None
+    assert data.import_prices_by_node is not None
+    assert data.import_prices_by_node["electricity_load__x"] == [0.123]
+    assert data.utility_rate_by_node is not None
+    assert data.utility_rate_by_node["electricity_load__x"] is not None
+    assert data.utility_rate_by_node["electricity_load__x"].demand_charges is not None
 
     # End-to-end model path: mixed-source inputs should still build demand-charge components.
     m = build_model(data, technology_parameters={}, financials={})

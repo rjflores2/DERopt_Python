@@ -67,10 +67,10 @@ def _demand_charge_has_nonzero_rates(demand_charges: dict[str, Any] | None) -> b
 
 
 def _has_nonzero_marginal_energy_prices(data: Any) -> bool:
-    ip = getattr(data, "import_prices", None)
-    if not ip:
+    by_node = getattr(data, "import_prices_by_node", None)
+    if not isinstance(by_node, dict):
         return False
-    return any(abs(float(p)) > _FLOAT_TOL for p in ip)
+    return any(abs(float(v)) > _FLOAT_TOL for vals in by_node.values() for v in (vals or []))
 
 
 def _utility_block_present(model: Any) -> bool:
@@ -92,10 +92,6 @@ def _import_prices_by_node(model: Any, data: Any) -> dict[str, list[float]]:
             vals = by_node.get(n)
             out[n] = [float(v) for v in (vals or [])]
         return out
-    ip = getattr(data, "import_prices", None) or []
-    shared = [float(v) for v in ip]
-    for n in nodes:
-        out[n] = shared
     return out
 
 
@@ -107,9 +103,6 @@ def _utility_rates_by_node(model: Any, data: Any) -> dict[str, Any | None]:
         for n in nodes:
             out[n] = by_node.get(n)
         return out
-    ur = getattr(data, "utility_rate", None)
-    for n in nodes:
-        out[n] = ur
     return out
 
 
@@ -223,13 +216,7 @@ def _check_negative_utility_energy_prices(data: Any) -> list[str]:
     if isinstance(by_node, dict):
         vals_by_node = {n: [float(v) for v in (by_node.get(n) or [])] for n in nodes}
     else:
-        ip = getattr(data, "import_prices", None)
-        if not ip:
-            return []
-        shared = [float(v) for v in ip]
-        vals_by_node = {n: shared for n in nodes}
-        if not nodes:
-            vals_by_node = {"_all": shared}
+        return []
     neg_nodes = [n for n, vals in vals_by_node.items() if any(v < -_FLOAT_TOL for v in vals)]
     if not neg_nodes:
         return []

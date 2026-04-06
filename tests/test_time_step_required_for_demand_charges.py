@@ -22,6 +22,7 @@ def test_demand_charges_missing_time_step_hours_raises():
             "flat_demand_charge_months": [1] * 12,
         },
     )
+    data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
 
     try:
         build_model(data, technology_parameters={}, financials={})

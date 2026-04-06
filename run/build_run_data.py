@@ -27,8 +27,8 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
 
     - Energy load (required)
     - Solar resource (if case_cfg.solar_path set)
-    - Utility: import price vector and optional rate metadata (if energy_price_path
-      or utility_rate_path set). Resolves to data.import_prices and data.utility_rate.
+    - Utility: node-scoped import prices and optional rate metadata (if energy_price_path
+      or utility_rate_path set). Resolves to data.import_prices_by_node and data.utility_rate_by_node.
 
     Future: wind, hydro, export rates, time subset, post-processing can be added here
     without expanding the playground script.
@@ -191,10 +191,6 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
             # Share the same list object for all nodes on the same tariff (no per-node copy).
             data.import_prices_by_node[n] = ip if ip is not None else zero_prices
 
-        # Backward-compatible mirrors: set to default tariff.
-        d_ur, d_ip = tariff_resolved[default_key]
-        data.utility_rate = d_ur
-        data.import_prices = list(d_ip) if d_ip is not None else None
     else:
         utility_rate, import_prices = _resolve_tariff_source(
             utility_rate_path=getattr(case_cfg, "utility_rate_path", None),
@@ -202,8 +198,14 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
             energy_price_path=getattr(case_cfg, "energy_price_path", None),
             energy_price_column=getattr(case_cfg, "energy_price_column", None),
         )
-        data.utility_rate = utility_rate
-        data.import_prices = import_prices
+        nodes = list(data.static.get("electricity_load_keys") or [])
+        if not nodes:
+            raise ValueError("single-tariff utility setup requires non-empty data.static['electricity_load_keys'].")
+        zero_prices = [0.0] * n_periods
+        node_prices = import_prices if import_prices is not None else zero_prices
+        data.import_prices_by_node = {node: node_prices for node in nodes}
+        data.utility_rate_by_node = {node: utility_rate for node in nodes}
+        data.node_utility_tariff_key = {node: "default" for node in nodes}
 
     # Subset last: slice every per-timestep series (timeseries + import_prices) in one place so lengths stay aligned.
     if case_cfg.time_subset is not None:
