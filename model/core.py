@@ -16,21 +16,16 @@ if TYPE_CHECKING:
 
 
 def build_model(
-    data: DataContainer | None = None,
+    data: DataContainer,
     *,
     technology_parameters: dict[str, Any] | None = None,
     financials: dict[str, Any] | None = None,
-) -> pyo.ConcreteModel | None:
+) -> pyo.ConcreteModel:
     """Build a Pyomo model with time set T and attach technology blocks when data supports them.
 
     Technologies: only those in technology_parameters with a non-None value are included; use {} for defaults.
     Utility data (node-scoped prices/rates) is read from data so the model has a single data contract.
-    Returns None if data is None (backward compatibility).
     """
-    # No data: return None so callers can handle "no model" without error.
-    if data is None:
-        return None
-
     # Fail fast if required data fields are missing (don't propagate bad data downstream).
     data.validate_minimum_fields()
 
@@ -48,6 +43,16 @@ def build_model(
     model.NODES = pyo.Set(initialize=list(load_keys), ordered=True)
 
     n_time = len(data.indices["time"])
+    # Validate load-series length up front so errors are clear before Pyomo indexing.
+    for node in load_keys:
+        series = data.timeseries.get(node)
+        if not isinstance(series, list):
+            raise ValueError(f"data.timeseries[{node!r}] must be a list with one value per time step")
+        if len(series) != n_time:
+            raise ValueError(
+                f"data.timeseries[{node!r}] length {len(series)} != time steps {n_time}"
+            )
+
     import_prices_by_node = getattr(data, "import_prices_by_node", None)
     utility_rate_by_node = getattr(data, "utility_rate_by_node", None)
     # Normalize any single-tariff data into node-scoped maps so downstream utility
@@ -57,7 +62,8 @@ def build_model(
     if import_prices is not None and len(import_prices) != n_time:
         raise ValueError(f"data.import_prices length {len(import_prices)} != time steps {n_time}")
     if import_prices_by_node is None and import_prices is not None:
-        import_prices_by_node = {n: import_prices for n in load_keys}
+        # Use separate list objects per node to avoid accidental cross-node mutation.
+        import_prices_by_node = {n: list(import_prices) for n in load_keys}
     if utility_rate_by_node is None and utility_rate is not None:
         utility_rate_by_node = {n: utility_rate for n in load_keys}
     if import_prices_by_node is not None:
