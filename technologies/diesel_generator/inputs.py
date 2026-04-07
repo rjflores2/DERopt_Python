@@ -1,4 +1,11 @@
-"""Diesel generator defaults, validation, and parameter resolution."""
+"""Diesel generator defaults, validation, and parameter resolution.
+
+Fuel price is configured as ``fuel_cost_per_gallon`` (and optional
+``diesel_heating_value_btu_per_gallon``, ``btu_per_kwh``); resolved
+``fuel_cost_per_kwh_diesel`` is $/kWh of diesel fuel energy (same basis as the gallon/HV conversion) for the objective
+and is the only fuel economic coefficient placed on the Pyomo block (gallon/BTU stay here).
+Direct $/kWh override: ``fuel_cost_per_kwh_diesel``, or legacy key ``fuel_cost_per_kwh_fuel`` (do not mix with gallon).
+"""
 
 from __future__ import annotations
 
@@ -25,7 +32,10 @@ DEFAULT_DIESEL_GENERATOR_PARAMS = {
     "fixed_om_per_kw_year": 20.0,
     "fixed_om_per_unit_year": 2000.0,
     "variable_om_per_kwh": 0.02,
-    "fuel_cost_per_kwh_fuel": 0.08,
+    # User-facing fuel price ($/gallon); converted to $/kWh thermal using HV and BTU/kWh.
+    "fuel_cost_per_gallon": 4.0,
+    "diesel_heating_value_btu_per_gallon": 128_488.0,
+    "btu_per_kwh": 3412.14,
     "electric_efficiency": 0.35,
     "minimum_loading_fraction": 0.0,
     "unit_capacity_kw": 100.0,
@@ -47,9 +57,11 @@ class ResolvedDieselGeneratorInputs:
     fixed_om_per_kw_year: float
     fixed_om_per_unit_year: float
     variable_om_per_kwh: float
-    fuel_cost_per_kwh_fuel: float
+    fuel_cost_per_gallon: float
+    diesel_heating_value_btu_per_gallon: float
+    btu_per_kwh: float
+    fuel_cost_per_kwh_diesel: float
     electric_efficiency: float
-    effective_fuel_cost_per_kwh_electric: float
     minimum_loading_fraction: float
     unit_capacity_kw: float
     existing_capacity_by_node: dict[str, float]
@@ -100,7 +112,8 @@ def resolve_diesel_generator_block_inputs(
     nodes: list[str],
 ) -> ResolvedDieselGeneratorInputs:
     """Merge defaults with user overrides and resolve diesel-generator parameters."""
-    params = (diesel_generator_params or {}).copy()
+    user_params = diesel_generator_params or {}
+    params = user_params.copy()
     for key, value in DEFAULT_DIESEL_GENERATOR_PARAMS.items():
         params.setdefault(key, value)
 
@@ -117,7 +130,42 @@ def resolve_diesel_generator_block_inputs(
     fixed_om_per_kw_year = float(params["fixed_om_per_kw_year"])
     fixed_om_per_unit_year = float(params["fixed_om_per_unit_year"])
     variable_om_per_kwh = float(params["variable_om_per_kwh"])
-    fuel_cost_per_kwh_fuel = float(params["fuel_cost_per_kwh_fuel"])
+    diesel_heating_value_btu_per_gallon = float(params["diesel_heating_value_btu_per_gallon"])
+    btu_per_kwh = float(params["btu_per_kwh"])
+    if diesel_heating_value_btu_per_gallon <= 0:
+        raise ValueError("diesel_generator: diesel_heating_value_btu_per_gallon must be > 0.")
+    if btu_per_kwh <= 0:
+        raise ValueError("diesel_generator: btu_per_kwh must be > 0.")
+
+    has_direct_kwh_diesel = "fuel_cost_per_kwh_diesel" in user_params
+    has_legacy_kwh_fuel = "fuel_cost_per_kwh_fuel" in user_params
+    has_gallon = "fuel_cost_per_gallon" in user_params
+    if has_direct_kwh_diesel and has_legacy_kwh_fuel:
+        raise ValueError(
+            "diesel_generator: use either fuel_cost_per_kwh_diesel or "
+            "fuel_cost_per_kwh_fuel (legacy), not both."
+        )
+    if (has_direct_kwh_diesel or has_legacy_kwh_fuel) and has_gallon:
+        raise ValueError(
+            "diesel_generator: specify either fuel_cost_per_gallon (recommended) or "
+            "a direct $/kWh diesel fuel-energy price (fuel_cost_per_kwh_diesel / fuel_cost_per_kwh_fuel), not both."
+        )
+    if has_direct_kwh_diesel:
+        fuel_cost_per_kwh_diesel = float(user_params["fuel_cost_per_kwh_diesel"])
+        fuel_cost_per_gallon = (
+            fuel_cost_per_kwh_diesel * diesel_heating_value_btu_per_gallon / btu_per_kwh
+        )
+    elif has_legacy_kwh_fuel:
+        fuel_cost_per_kwh_diesel = float(user_params["fuel_cost_per_kwh_fuel"])
+        fuel_cost_per_gallon = (
+            fuel_cost_per_kwh_diesel * diesel_heating_value_btu_per_gallon / btu_per_kwh
+        )
+    else:
+        fuel_cost_per_gallon = float(params["fuel_cost_per_gallon"])
+        fuel_cost_per_kwh_diesel = (
+            fuel_cost_per_gallon * btu_per_kwh / diesel_heating_value_btu_per_gallon
+        )
+
     electric_efficiency = float(params["electric_efficiency"])
     minimum_loading_fraction = float(params["minimum_loading_fraction"])
     unit_capacity_kw = float(params["unit_capacity_kw"])
@@ -135,7 +183,8 @@ def resolve_diesel_generator_block_inputs(
         fixed_om_per_kw_year,
         fixed_om_per_unit_year,
         variable_om_per_kwh,
-        fuel_cost_per_kwh_fuel,
+        fuel_cost_per_kwh_diesel,
+        fuel_cost_per_gallon,
     ) < 0:
         raise ValueError("diesel_generator: cost inputs must be >= 0.")
 
@@ -172,9 +221,11 @@ def resolve_diesel_generator_block_inputs(
         fixed_om_per_kw_year=fixed_om_per_kw_year,
         fixed_om_per_unit_year=fixed_om_per_unit_year,
         variable_om_per_kwh=variable_om_per_kwh,
-        fuel_cost_per_kwh_fuel=fuel_cost_per_kwh_fuel,
+        fuel_cost_per_gallon=fuel_cost_per_gallon,
+        diesel_heating_value_btu_per_gallon=diesel_heating_value_btu_per_gallon,
+        btu_per_kwh=btu_per_kwh,
+        fuel_cost_per_kwh_diesel=fuel_cost_per_kwh_diesel,
         electric_efficiency=electric_efficiency,
-        effective_fuel_cost_per_kwh_electric=fuel_cost_per_kwh_fuel / electric_efficiency,
         minimum_loading_fraction=minimum_loading_fraction,
         unit_capacity_kw=unit_capacity_kw,
         existing_capacity_by_node=existing_capacity_by_node,

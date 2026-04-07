@@ -33,7 +33,9 @@ def add_diesel_generator_block(
     1. Data and other inputs
        - ``data.static["electricity_load_keys"]`` -> ordered node keys (already loaded on ``model.NODES``)
        - ``model.T`` -> time periods from ``model.core``
-       - ``diesel_generator_params`` -> user options merged with defaults
+       - ``diesel_generator_params`` -> user options merged with defaults (fuel may be set as ``fuel_cost_per_gallon``
+         plus heating-value conversions in ``technologies/diesel_generator/inputs.py``; only ``fuel_cost_per_kwh_diesel``
+         appears on the Pyomo block)
        - ``financials`` -> used to annualize adopted capital cost
 
     2. Sets (Pyomo ``Set``)
@@ -55,7 +57,8 @@ def add_diesel_generator_block(
        - ``capital_cost_per_kw`` / ``capital_cost_per_unit``
        - ``fixed_om_per_kw_year`` / ``fixed_om_per_unit_year``
        - ``variable_om_per_kwh``
-       - ``fuel_cost_per_kwh_fuel`` / ``electric_efficiency`` / ``effective_fuel_cost_per_kwh_electric``
+       - ``fuel_cost_per_kwh_diesel`` ($/kWh diesel fuel energy) / ``electric_efficiency`` (variable fuel cost uses
+         ``fuel_cost_per_kwh_diesel / electric_efficiency`` per kWh electricity generated)
        - ``minimum_loading_fraction``
        - ``unit_capacity_kw``
        - ``existing_capacity[node]`` (continuous-capacity formulations)
@@ -106,31 +109,32 @@ def add_diesel_generator_block(
     allow_adoption = resolved.allow_adoption
 
     def block_rule(diesel_block):
+        #Diesel generator capital cost per kW
         diesel_block.capital_cost_per_kw = pyo.Param(
             initialize=resolved.capital_cost_per_kw, within=pyo.NonNegativeReals, mutable=True
         )
+        #Diesel generator capital cost per unit
         diesel_block.capital_cost_per_unit = pyo.Param(
             initialize=resolved.capital_cost_per_unit, within=pyo.NonNegativeReals, mutable=True
         )
+        #Diesel generator fixed O&M per kW per year
         diesel_block.fixed_om_per_kw_year = pyo.Param(
             initialize=resolved.fixed_om_per_kw_year, within=pyo.NonNegativeReals, mutable=True
         )
+        #Diesel generator fixed O&M per unit per year
         diesel_block.fixed_om_per_unit_year = pyo.Param(
             initialize=resolved.fixed_om_per_unit_year, within=pyo.NonNegativeReals, mutable=True
         )
+        #Diesel generator variable O&M per kWh
         diesel_block.variable_om_per_kwh = pyo.Param(
             initialize=resolved.variable_om_per_kwh, within=pyo.NonNegativeReals, mutable=True
         )
-        diesel_block.fuel_cost_per_kwh_fuel = pyo.Param(
-            initialize=resolved.fuel_cost_per_kwh_fuel, within=pyo.NonNegativeReals, mutable=True
+        # $/kWh diesel fuel energy; gallon/BTU conversion is done in inputs.py only.
+        diesel_block.fuel_cost_per_kwh_diesel = pyo.Param(
+            initialize=resolved.fuel_cost_per_kwh_diesel, within=pyo.NonNegativeReals, mutable=True
         )
         diesel_block.electric_efficiency = pyo.Param(
             initialize=resolved.electric_efficiency, within=pyo.NonNegativeReals, mutable=True
-        )
-        diesel_block.effective_fuel_cost_per_kwh_electric = pyo.Param(
-            initialize=resolved.effective_fuel_cost_per_kwh_electric,
-            within=pyo.NonNegativeReals,
-            mutable=True,
         )
         diesel_block.minimum_loading_fraction = pyo.Param(
             initialize=resolved.minimum_loading_fraction, within=pyo.NonNegativeReals, mutable=True
@@ -295,7 +299,7 @@ def add_diesel_generator_block(
             expr=sum(
                 (
                     diesel_block.variable_om_per_kwh
-                    + diesel_block.effective_fuel_cost_per_kwh_electric
+                    + diesel_block.fuel_cost_per_kwh_diesel / diesel_block.electric_efficiency
                 )
                 * diesel_block.diesel_generation[node, t]
                 for node in nodes

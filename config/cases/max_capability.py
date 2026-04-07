@@ -81,7 +81,6 @@ def default_max_capability_case(project_root: Path) -> CaseConfig:
                 "capital_cost_per_kw": 950.0,
                 "fixed_om_per_kw_year": 18.0,
                 "variable_om_per_kwh": 0.02,
-                "fuel_cost_per_kwh_fuel": 0.10,
                 "electric_efficiency": 0.35,
                 "minimum_loading_fraction": 0.30,
                 "existing_capacity_by_node": {
