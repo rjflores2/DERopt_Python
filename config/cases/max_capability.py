@@ -75,6 +75,26 @@ def default_max_capability_case(project_root: Path) -> CaseConfig:
                 },
                 "initial_soc_fraction": 0.5,
             },
+            "diesel_generator": {
+                "allow_adoption": True,
+                "formulation": "commitment_milp",
+                "capital_cost_per_kw": 950.0,
+                "fixed_om_per_kw_year": 18.0,
+                "variable_om_per_kwh": 0.02,
+                "fuel_cost_per_kwh_fuel": 0.10,
+                "electric_efficiency": 0.35,
+                "minimum_loading_fraction": 0.30,
+                "existing_capacity_by_node": {
+                    node_1: 250.0,
+                    node_2: 150.0,
+                    node_3: 100.0,
+                },
+                "capacity_adoption_limit_by_node": {
+                    node_1: 500.0,
+                    node_2: 400.0,
+                    node_3: 300.0,
+                },
+            },
         },
         financials=FinancialsConfig(
             debt_fraction=0.6,

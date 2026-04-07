@@ -26,6 +26,7 @@ MODULES = [
     "technologies.pumped_hydro",
     "technologies.battery_energy_storage",
     "technologies.flow_battery_energy_storage",
+    "technologies.diesel_generator",
     "technologies.diesel_generation",
     "technologies.gas_turbine",
     "technologies.high_temperature_fuel_cell",
