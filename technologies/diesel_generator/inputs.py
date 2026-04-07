@@ -1,10 +1,13 @@
 """Diesel generator defaults, validation, and parameter resolution.
 
+``formulation`` must be an exact string (``diesel_lp``, ``diesel_binary``, ``diesel_unit_milp``); no aliases,
+so the same pattern can be reused across technologies.
+
 Fuel price is configured as ``fuel_cost_per_gallon`` (and optional
 ``diesel_heating_value_btu_per_gallon``, ``btu_per_kwh``); resolved
 ``fuel_cost_per_kwh_diesel`` is $/kWh of diesel fuel energy (same basis as the gallon/HV conversion) for the objective
 and is the only fuel economic coefficient placed on the Pyomo block (gallon/BTU stay here).
-Direct $/kWh override: ``fuel_cost_per_kwh_diesel``, or legacy key ``fuel_cost_per_kwh_fuel`` (do not mix with gallon).
+Direct $/kWh override: ``fuel_cost_per_kwh_diesel`` (do not mix with ``fuel_cost_per_gallon``).
 """
 
 from __future__ import annotations
@@ -15,18 +18,21 @@ from typing import Any
 from shared.financials import annualization_factor_debt_equity
 
 
-FORMULATION_CONTINUOUS_LP = "continuous_lp"
-FORMULATION_COMMITMENT_MILP = "commitment_milp"
-FORMULATION_DISCRETE_UNITS_MILP = "discrete_units_milp"
-VALID_FORMULATIONS = {
-    FORMULATION_CONTINUOUS_LP,
-    FORMULATION_COMMITMENT_MILP,
-    FORMULATION_DISCRETE_UNITS_MILP,
-}
+FORMULATION_DIESEL_LP = "diesel_lp"
+FORMULATION_DIESEL_BINARY = "diesel_binary"
+FORMULATION_DIESEL_UNIT_MILP = "diesel_unit_milp"
+
+_VALID_FORMULATION_STRINGS = frozenset(
+    {
+        FORMULATION_DIESEL_LP,
+        FORMULATION_DIESEL_BINARY,
+        FORMULATION_DIESEL_UNIT_MILP,
+    }
+)
 
 DEFAULT_DIESEL_GENERATOR_PARAMS = {
     "allow_adoption": True,
-    "formulation": FORMULATION_CONTINUOUS_LP,
+    "formulation": FORMULATION_DIESEL_LP,
     "capital_cost_per_kw": 900.0,
     "capital_cost_per_unit": 90000.0,
     "fixed_om_per_kw_year": 20.0,
@@ -118,11 +124,11 @@ def resolve_diesel_generator_block_inputs(
         params.setdefault(key, value)
 
     allow_adoption = bool(params["allow_adoption"])
-    formulation = str(params["formulation"])
-    if formulation not in VALID_FORMULATIONS:
+    formulation = str(params["formulation"]).strip()
+    if formulation not in _VALID_FORMULATION_STRINGS:
         raise ValueError(
             "diesel_generator: formulation must be one of "
-            f"{sorted(VALID_FORMULATIONS)}, got {formulation!r}."
+            f"{sorted(_VALID_FORMULATION_STRINGS)}, got {params['formulation']!r}."
         )
 
     capital_cost_per_kw = float(params["capital_cost_per_kw"])
@@ -138,25 +144,14 @@ def resolve_diesel_generator_block_inputs(
         raise ValueError("diesel_generator: btu_per_kwh must be > 0.")
 
     has_direct_kwh_diesel = "fuel_cost_per_kwh_diesel" in user_params
-    has_legacy_kwh_fuel = "fuel_cost_per_kwh_fuel" in user_params
     has_gallon = "fuel_cost_per_gallon" in user_params
-    if has_direct_kwh_diesel and has_legacy_kwh_fuel:
-        raise ValueError(
-            "diesel_generator: use either fuel_cost_per_kwh_diesel or "
-            "fuel_cost_per_kwh_fuel (legacy), not both."
-        )
-    if (has_direct_kwh_diesel or has_legacy_kwh_fuel) and has_gallon:
+    if has_direct_kwh_diesel and has_gallon:
         raise ValueError(
             "diesel_generator: specify either fuel_cost_per_gallon (recommended) or "
-            "a direct $/kWh diesel fuel-energy price (fuel_cost_per_kwh_diesel / fuel_cost_per_kwh_fuel), not both."
+            "fuel_cost_per_kwh_diesel, not both."
         )
     if has_direct_kwh_diesel:
         fuel_cost_per_kwh_diesel = float(user_params["fuel_cost_per_kwh_diesel"])
-        fuel_cost_per_gallon = (
-            fuel_cost_per_kwh_diesel * diesel_heating_value_btu_per_gallon / btu_per_kwh
-        )
-    elif has_legacy_kwh_fuel:
-        fuel_cost_per_kwh_diesel = float(user_params["fuel_cost_per_kwh_fuel"])
         fuel_cost_per_gallon = (
             fuel_cost_per_kwh_diesel * diesel_heating_value_btu_per_gallon / btu_per_kwh
         )

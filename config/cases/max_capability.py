@@ -77,7 +77,7 @@ def default_max_capability_case(project_root: Path) -> CaseConfig:
             },
             "diesel_generator": {
                 "allow_adoption": True,
-                "formulation": "commitment_milp",
+                "formulation": "diesel_binary",
                 "capital_cost_per_kw": 950.0,
                 "fixed_om_per_kw_year": 18.0,
                 "variable_om_per_kwh": 0.02,
