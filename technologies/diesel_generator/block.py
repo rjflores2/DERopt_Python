@@ -33,6 +33,7 @@ def add_diesel_generator_block(
     1. Data and other inputs
        - ``data.static["electricity_load_keys"]`` -> ordered node keys (already loaded on ``model.NODES``)
        - ``model.T`` -> time periods from ``model.core``
+       - ``data.timeseries[node]`` -> used for ``diesel_binary`` peak load ``maximum_load_at_node`` (same length as ``model.T``)
        - ``diesel_generator_params`` -> user options merged with defaults (fuel may be set as ``fuel_cost_per_gallon``
          plus heating-value conversions in ``technologies/diesel_generator/inputs.py``; only ``fuel_cost_per_kwh_diesel``
          appears on the Pyomo block)
@@ -65,10 +66,11 @@ def add_diesel_generator_block(
        - ``existing_unit_count[node]`` (discrete-units formulation)
        - ``capacity_adoption_limit[node]`` / ``unit_adoption_limit[node]``
        - ``amortization_factor``
-       - ``maximum_load_at_node[node]`` (``diesel_binary`` only) -> peak ``data.timeseries`` load over ``model.T`` (commitment big-M)
 
     5. Other named components on the block
        - ``installed_capacity[node]`` -> continuous installed kW for ``diesel_lp`` and ``diesel_binary``
+       - ``maximum_load_at_node[node]`` (``diesel_binary`` only) -> peak ``data.timeseries`` load over ``model.T``;
+         commitment big-M and min-load relaxation (may cap output below nameplate if peak load < installed capacity)
        - ``installed_unit_count[node]`` -> total installed units for ``diesel_unit_milp``
        - ``maximum_total_units[node]`` -> bound for discrete unit-count logic
 
@@ -90,8 +92,8 @@ def add_diesel_generator_block(
        - ``diesel_binary``:
          - ``generation_capacity_limit``: generation <= installed continuous capacity
          - ``generation_commitment_big_m``: generation <= maximum_load_at_node * diesel_on
-         - ``generation_min_loading``: minimum loading enforced when ``diesel_on = 1``
-           (big-M relaxation when ``diesel_on = 0``; uses ``maximum_load_at_node`` as in ``generation_commitment_big_m``)
+         - ``generation_min_loading``: minimum loading when ``diesel_on = 1``; when off, relaxed with
+           ``maximum_load_at_node * (1 - diesel_on)``
        - ``diesel_unit_milp``:
          - ``units_on_limit``: units on <= installed units
          - ``generation_upper_by_units``: generation <= unit_capacity * units_on
@@ -173,7 +175,7 @@ def add_diesel_generator_block(
         diesel_block.amortization_factor = pyo.Param(
             initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=True
         )
-        # Electrical output from a diesel generator
+        # Electrical output from a diesel generator - Used in all diesel formulations
         diesel_block.diesel_generation = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
 
         if formulation in (FORMULATION_DIESEL_LP, FORMULATION_DIESEL_BINARY):
@@ -195,10 +197,8 @@ def add_diesel_generator_block(
 
                 diesel_block.generation_limits = pyo.Constraint(nodes, T, rule=generation_limits_rule)
             else:
-                # Peak load at each node over the modeled horizon (from data.timeseries).
-                # Commitment big-M uses this (linear in diesel_on). If other sinks can absorb
-                # power beyond contemporaneous load (e.g. storage charging), peak load may be
-                # below the maximum feasible diesel output at that node.
+                # Peak load over the horizon (data.timeseries). Used as M in diesel_on linearization.
+                # If other sinks can draw power beyond contemporaneous load, peak load may under-estimate max diesel output.
                 diesel_block.maximum_load_at_node = pyo.Param(
                     nodes, initialize=max_load_by_node, within=pyo.NonNegativeReals, mutable=True
                 )
@@ -213,7 +213,7 @@ def add_diesel_generator_block(
                 def generation_min_loading_rule(m, node, t):
                     return m.diesel_generation[node, t] >= (
                         m.minimum_loading_fraction * m.installed_capacity[node]
-                        - m.minimum_loading_fraction * m.maximum_load_at_node[node] * (1 - m.diesel_on[node, t])
+                        - m.maximum_load_at_node[node] * (1 - m.diesel_on[node, t])
                     )
 
                 diesel_block.generation_capacity_limit = pyo.Constraint(
