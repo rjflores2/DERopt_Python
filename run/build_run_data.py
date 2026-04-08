@@ -1,7 +1,7 @@
 """Build the unified run data container from case config.
 
-Loads energy load, solar, utility (OpenEI or raw 8760/N), and populates a single
-DataContainer. Add wind, hydro, export rates, post-processing here so playground
+Loads energy load, solar, hydrokinetic, utility (OpenEI or raw 8760/N), and populates a single
+DataContainer. Add wind, export rates, post-processing here so playground
 stays a thin entry point.
 """
 
@@ -10,7 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from data_loading.loaders import load_energy_load, load_openei_rate, load_solar_into_container
+from data_loading.loaders import (
+    load_energy_load,
+    load_hydrokinetic_into_container,
+    load_openei_rate,
+    load_solar_into_container,
+)
 from data_loading.loaders.utility_rates import (
     get_import_prices_for_timestamps,
     load_raw_energy_prices,
@@ -27,10 +32,11 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
 
     - Energy load (required)
     - Solar resource (if case_cfg.solar_path set)
+    - Hydrokinetic resource (if case_cfg.hydrokinetic_path set)
     - Utility: node-scoped import prices and optional rate metadata (if energy_price_path
       or utility_rate_path set). Resolves to data.import_prices_by_node and data.utility_rate_by_node.
 
-    Future: wind, hydro, export rates, time subset, post-processing can be added here
+    Future: wind, export rates, time subset, post-processing can be added here
     without expanding the playground script.
     """
     data = load_energy_load(case_cfg.energy_load)
@@ -39,6 +45,18 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
         if not case_cfg.solar_path.exists():
             raise FileNotFoundError(f"solar_path set but file missing: {case_cfg.solar_path}")
         load_solar_into_container(data, case_cfg.solar_path)
+
+    hkt_path = getattr(case_cfg, "hydrokinetic_path", None)
+    if hkt_path is not None:
+        if not hkt_path.exists():
+            raise FileNotFoundError(f"hydrokinetic_path set but file missing: {hkt_path}")
+        load_hydrokinetic_into_container(
+            data,
+            hkt_path,
+            reference_kw=getattr(case_cfg, "hydrokinetic_reference_kw", 1.0),
+            datetime_column=getattr(case_cfg, "hydrokinetic_datetime_column", None),
+            reference_swept_area_m2=getattr(case_cfg, "hydrokinetic_reference_swept_area_m2", None),
+        )
 
     timestamps = data.timeseries.get("datetime") or []
     n_periods = len(data.indices.get("time") or [])

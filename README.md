@@ -1,6 +1,8 @@
 # DERopt Python
 
-Energy system optimization model that selects and sizes distributed energy resources (DERs) to meet electricity and energy needs at lowest cost. Built with **Pyomo** and solved with **Gurobi**.
+Energy system optimization model that selects and sizes distributed energy resources (DERs) to meet electricity needs at lowest cost. Built with **Pyomo** and solved with **Gurobi**.
+
+The model currently includes **grid/utility imports** (energy, demand charges, fixed customer charges when tariff data provides them) and optional **technologies**: solar PV, battery energy storage, and diesel generation. Technologies are **opt-in** via `technology_parameters` on the case: each key may be `{}` (use module defaults), a dict of overrides, or `None` (omit that technology entirely).
 
 ## Quick Start
 
@@ -12,7 +14,7 @@ From the project root:
 python -m run.playground
 ```
 
-This loads the default case (`Igiugig_xlsx`), loads electricity load data (and solar if present for the case), builds the model, and runs. Output is printed to the console.
+This loads the default case (`Igiugig_xlsx`), loads electricity load data (and solar if the case sets `solar_path`), builds the model, and runs. Output is printed to the console. Unless `DEROPT_QUIET=1`, the run also prints `electricity_load_keys` and `solar_production_keys` so you can author `technology_parameters` with the correct strings.
 
 ### Choose a different case
 
@@ -29,30 +31,33 @@ set DEROPT_CASE=igiugig xlsx && python -m run.playground
 DEROPT_CASE="igiugig xlsx" python -m run.playground
 ```
 
-Available cases (as of this writing): `igiugig`, `igiugig multi node`, `igiugig xlsx`.
+Available cases (auto-discovered from `config/cases/`): `igiugig`, `igiugig multi node`, `igiugig xlsx`, `max capability`.
+
+The **`max capability`** case is a deliberately heavy example (multi-node load, multi-profile solar, battery, diesel, multi-tariff utility, raw price override, financing). It expects data under `data/MaxCapability/` (see `config/cases/max_capability.py`).
 
 ## Data
 
-Input data lives in the `data/` folder (gitignored). Each case points to a subfolder, e.g. `data/Igiugig/`, `data/Igiugig_xlsx/`.
+The `data/` directory is **gitignored**; cases point at subfolders you create locally (e.g. `data/Igiugig/`, `data/Igiugig_xlsx/`, `data/MaxCapability/`).
 
 ### Electricity load files
 
 - Supported formats: CSV, XLSX, XLS
-- Required columns: datetime column (e.g. `Date`), one or more load columns with `(kW)` or `(kWh)` in the header (e.g. `Electric Demand (kW)`). Multiple electricity columns (e.g. multi-node) are supported; duplicate headers are deduplicated.
+- Required columns: datetime column (e.g. `Date`), one or more load columns with `(kW)` or `(kWh)` in the header (e.g. `Electric Demand (kW)`). Multiple electricity columns (multi-node) are supported.
+- Duplicate load headers are made unique when the file is read (e.g. suffixes on repeated names). Prefer **distinct column names** per node (e.g. `Node 1 Electric (kW)`) so `electricity_load_keys` stay obvious.
 - All load data is stored in **kWh** in the model (kW from file is converted using the time step). Series keys: `electricity_load__{suffix}`; list in `data.static["electricity_load_keys"]`.
 - Datetime formats: strftime strings, `excel_serial`, `matlab_serial`, or `auto` (auto-detect from numeric values)
-- For a data folder, the loader auto-discovers files with `"loads"` in the filename (e.g. `Electric_Loads.xlsx`)
+- For a data folder, the loader auto-discovers files with `"loads"` in the filename (case-insensitive), preferring `.xlsx` over `.csv` over `.xls`.
 - **Time conditioning** (optional): Set `target_interval_minutes=60` or `15` in `EnergyLoadFileConfig` to regularize timestamps when irregular; otherwise only NaN/negative filling is applied. Use `target_interval_minutes=None` (default) to keep native resolution.
 - Thermal-looking columns such as `Heating (kW)`, `Cooling (kWh)`, `Thermal Load (kW)`, or `DHW (kW)` are excluded from automatic electricity-load selection so they are not mixed into `electricity_load_keys`.
 
 ### Solar resource files (optional)
 
-- When a case has `solar_path` set, the loader reads a solar file (CSV or Excel .xlsx/.xls) and aligns it to the load time vector by time-of-year. Discovery prefers .xlsx over .csv over .xls; the loader supports all three so the discovered path is always loadable.
-- Output is **kWh per kW capacity** (kWh/kW): capacity factor from file × time step. Keys: `solar_production__{suffix}`; list in `data.static["solar_production_keys"]`; units in `data.static["solar_production_units"]` = `"kWh/kW"`.
+- When a case has `solar_path` set, the loader reads a solar file (CSV or Excel .xlsx/.xls) and aligns it to the load time vector by time-of-year. Discovery prefers `.xlsx` over `.csv` over `.xls`; the loader supports all three so the discovered path is always loadable.
+- The file is treated as **capacity factor** (0–1) per period; stored values are **kWh per kW installed** for that period: CF × `time_step_hours`. Keys: `solar_production__{suffix}`; list in `data.static["solar_production_keys"]`; units in `data.static["solar_production_units"]` = `"kWh/kW"`.
 
 #### Standard solar profile labels
 
-Use consistent column names in solar CSVs so case config (e.g. `max_capacity_area_by_node_and_profile`, `params_by_profile`) can refer to the same keys across sites. Column headers are normalized to a key suffix (lowercase, non-alphanumeric → underscore). Recommended labels:
+Use consistent column names in solar files so case config (e.g. `max_capacity_area_by_node_and_profile`, `params_by_profile`) can refer to the same keys across sites. Column headers are normalized to a key suffix (lowercase, non-alphanumeric → underscore). Recommended labels:
 
 | Profile | Recommended CSV column | Resulting key |
 |--------|------------------------|---------------|
@@ -65,37 +70,73 @@ Use consistent column names in solar CSVs so case config (e.g. `max_capacity_are
 | Fixed west | `Fixed West` or `fixed_west` | `solar_production__fixed_west` |
 | Flat (horizontal) | `Flat` or `fixed_flat` | `solar_production__flat` or `solar_production__fixed_flat` |
 
-Use the **resulting key** in config when keying by profile name (e.g. in `max_capacity_area_by_node_and_profile`). Order of columns in the CSV sets the order in `solar_production_keys` for list-based config (e.g. `params_by_profile`).
+Use the **resulting key** in config when keying by profile name (e.g. in `max_capacity_area_by_node_and_profile`). Column order defines `solar_production_keys`, which matters if you use a **list** for `params_by_profile` (see below).
 
-### Technology parameters (solar)
+## Technology parameters
 
-Solar technoeconomic parameters (efficiency, capital cost, O&M, area limits) are set via case config’s `technology_parameters["solar_pv"]`; defaults live in `technologies/solar_pv/inputs.py`. When you have multiple solar profiles (e.g. fixed and 1-D tracking), give each its own values by setting **`params_by_profile`** to a **list in the same order as your solar data columns** (first list entry = first profile, second = second, etc.). Area limits are configured per `(node, profile)` via **`max_capacity_area_by_node_and_profile`** using either a tuple-key dict or nested dict.
+Technologies are configured under `CaseConfig.technology_parameters` with keys matching `technologies.REGISTRY`: `solar_pv`, `battery_energy_storage`, `diesel_generator`.
+
+- **`{}` or omitted fields**: merged with defaults in each technology’s `inputs.py`.
+- **`None` for a technology key**: that technology block is not built.
+
+Financing for annualized capital on adopted equipment uses `CaseConfig.financials` (`FinancialsConfig`: debt/equity terms). If unset, defaults from `config/case_config.py` apply.
+
+Optional **horizon subsetting** for faster runs: `CaseConfig.time_subset` (`TimeSubsetConfig` in `data_loading/time_subset.py`).
+
+### Solar PV (`solar_pv`)
+
+Technoeconomic parameters (efficiency, capital cost, O&M, area limits, existing PV, recovery on existing) are set via `technology_parameters["solar_pv"]`; defaults live in `technologies/solar_pv/inputs.py`.
+
+For multiple solar profiles, **`params_by_profile`** may be:
+
+- A **list** in the same order as `data.static["solar_production_keys"]` (first list entry = first profile column), or
+- A **dict** keyed by the full production key (e.g. `solar_production__fixed_optimal`), so order in the file does not matter.
+
+Area limits use **`max_capacity_area_by_node_and_profile`** (tuple-key dict or nested dict per node). Existing capacity uses **`existing_solar_capacity_by_node_and_profile`**.
 
 ```python
-# Example: two profiles (e.g. fixed, then 1-D tracking) — order must match solar_production_keys
 technology_parameters={
     "solar_pv": {
-        # Area by node/profile (tuple-key form)
         "max_capacity_area_by_node_and_profile": {
             ("electricity_load__a", "solar_production__fixed_optimal"): 500,
             ("electricity_load__a", "solar_production__1d_tracking"): 300,
         },
+        # List form (order must match solar_production_keys)
         "params_by_profile": [
             {"efficiency": 0.20, "capital_cost_per_kw": 1500, "om_per_kw_year": 18},
             {"efficiency": 0.22, "capital_cost_per_kw": 2100, "om_per_kw_year": 24},
         ],
+        # Or dict form (keys = solar_production__* strings)
+        # "params_by_profile": {
+        #     "solar_production__fixed_optimal": {"efficiency": 0.20, ...},
+        #     "solar_production__1d_tracking": {"efficiency": 0.22, ...},
+        # },
     },
 }
 ```
 
-You can override only some fields per profile; the rest come from the top-level `solar_pv` dict or from defaults. Existing capacity is per (node, profile): set **`existing_solar_capacity_by_node_and_profile`** to `{(node_key, profile_key): kW}` or `{node_key: {profile_key: kW}}`; default is 0 at every node.
+### Battery energy storage (`battery_energy_storage`)
+
+Defaults and validation: `technologies/battery_energy_storage/inputs.py`. Typical keys include charge/discharge efficiency, capital and O&M per kWh, C-rate limits (`max_charge_power_per_kwh`, `max_discharge_power_per_kwh`), optional existing energy capacity per node, and optional `initial_soc_fraction`.
+
+### Diesel generator (`diesel_generator`)
+
+Defaults and validation: `technologies/diesel_generator/inputs.py`.
+
+- **`formulation`** (exact strings): `diesel_lp`, `diesel_binary`, or `diesel_unit_milp`.
+- **Fuel economics**: usually `fuel_cost_per_gallon` with heating-value conversion to \$/kWh, or a direct override `fuel_cost_per_kwh_diesel` (do not mix both).
+- Optional per-node **existing** capacity / unit counts and **adoption limits** (capacity and discrete units), depending on formulation.
 
 ### Utility tariffs (single and multi-node)
 
-Utility costs are attached via `utilities/electricity_import_export/` and support both:
+Utility costs are attached via `utilities/electricity_import_export/`. The grid block is registered when **import energy prices**, **demand charges**, and/or **fixed customer charges** apply for at least one node; otherwise the block may be omitted.
 
-- **Single tariff** via `CaseConfig.utility_rate_path` (OpenEI) and/or `CaseConfig.energy_price_path` (raw series)
+Supported case shapes:
+
+- **Single tariff** via `CaseConfig.utility_rate_path` (OpenEI-style JSON) and/or `CaseConfig.energy_price_path` (raw CSV series for \$/kWh)
 - **Multi-tariff** via `CaseConfig.utility_tariffs` with optional node exceptions in `CaseConfig.node_utility_tariff`
+
+When using `utility_tariffs`, do not set the legacy single-tariff fields on `CaseConfig` at the same time (the loader raises).
 
 For multi-tariff:
 
@@ -148,28 +189,26 @@ When adding or changing code, prefer **explicit validation and early raises** ov
 | Path | Role |
 |------|------|
 | `config/` | Run and case configuration; `config/cases/` holds one module per case |
-| `data/` | Input data (gitignored); load profiles, rates, etc. |
+| `data/` | Local input data (gitignored); load profiles, rates, etc. |
 | `data_loading/` | Loaders that read data and populate the DataContainer |
 | `model/` | Pyomo model assembly (`core.py` is the central meeting place) |
-| `technologies/` | Technology modules (PV, wind, batteries, etc.) |
-| `utilities/` | Grid/tariff and network; `electricity_import_export/` mirrors tech packages (`block`, `inputs`, `demand_charge_indexing`, `diagnostics`) |
+| `technologies/` | Technology modules: solar PV, battery storage, diesel generator (`REGISTRY` in `technologies/__init__.py`) |
+| `utilities/` | Grid/tariff; `electricity_import_export/` mirrors tech packages (`block`, `inputs`, `demand_charge_indexing`, diagnostics) |
 | `run/playground.py` | Main entry point |
 | `shared/` | Shared utilities (e.g. financials) |
 
 ## Dependencies
 
+Declared in **`pyproject.toml`** (install with `pip install -e .`):
+
 - Python 3.10+
-- **Pyomo**, **gurobipy** - Optimization model and solver
-- **pandas**, **openpyxl**, **xlrd** - Data loading (CSV, Excel)
-- **numpy**, **scipy** - Numerics
-- **networkx** - Graph/network structures (multi-node)
-- **matplotlib**, **plotly** - Plotting and visualization
-- **jupyter** - Interactive analysis
-- **pint** - Unit handling
-- **sympy** - Symbolic math (if needed)
-- **pyyaml** - YAML config loading
-- **pymysql**, **pyodbc** - Database connections (if needed)
-- **pyro4** - Remote/distributed (if needed)
+- **Pyomo**, **gurobipy** — model and solver
+- **pandas**, **openpyxl**, **xlrd** — CSV/Excel loading
+- **numpy**, **scipy** — numerics
+
+Development tests: `pip install -e ".[dev]"` (adds **pytest**).
+
+Other libraries (e.g. plotting, notebooks, YAML, DB drivers) are not required for the core package as currently specified; add them in your environment if you use tooling that depends on them.
 
 ## For developers
 

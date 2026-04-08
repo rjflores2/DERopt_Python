@@ -1,88 +1,91 @@
 # DERopt Plan
 
-This is the single planning document for the Python/Pyomo rebuild. `README.md` is the user/developer operating guide; this file is the roadmap and architecture reference.
+Single planning document for the Python/Pyomo rebuild. **`README.md`** is the operating guide for users; **`docs/DEVELOPMENT.md`** is the day-to-day contributor map. This file is the roadmap, architecture reference, and milestone tracker.
 
 ## Purpose
 
-- Rebuild DERopt in Python using Pyomo with a modular architecture.
-- Keep core model assembly generic; put technology and utility logic in separate modules.
-- Support staged delivery (slice-based) with testable milestones.
+- Rebuild DERopt in Python using **Pyomo**, solved with **Gurobi**.
+- Keep **`model/core.py`** generic: time and nodes, electricity balance, objective aggregation, and registration of blocks.
+- Put **technology** and **utility** logic in dedicated packages with a small, repeatable contract (balance terms, objective terms, optional diagnostics).
+- Support **staged delivery** with testable milestones and a **fail-fast** data/config contract.
 
 ## Architecture
 
 Repository structure and ownership:
 
-- `config/`: case configs and discovery
-- `data_loading/`: file loaders and data contract (`DataContainer`)
-- `model/core.py`: model assembly, balances, and objective aggregation
-- `technologies/`: one module per technology (solar, storage, diesel, etc.)
-- `utilities/`: tariffs/import-export/network modules
-- `run/playground.py`: local orchestration entry point
-- `tests/`: unit/regression tests
+| Area | Role |
+|------|------|
+| `config/` | `CaseConfig`, financials, time subset, case discovery (`config/cases/*.py`) |
+| `data_loading/` | Loaders and **`DataContainer`**; unit/time alignment before model build |
+| `model/core.py` | Sets `T`, `NODES`, technology loop, utility registration, balance, objective |
+| `technologies/` | Opt-in blocks via **`REGISTRY`** in `technologies/__init__.py` |
+| `utilities/electricity_import_export/` | Grid import, energy cost, demand charges, fixed customer charges (not in `REGISTRY`) |
+| `run/playground.py` | Local orchestration; `run/build_run_data.py` assembles `DataContainer` |
+| `utilities/results.py` | Solution extraction and optional CSV export |
+| `tests/` | Unit and integration tests |
 
 Design rules:
 
-- Core is the meeting place, not the business-logic owner.
-- Technologies/utilities register balance and objective contributions.
-- Data loaders normalize units/time alignment before model build.
-- Fail fast on invalid config/data/dispatch conditions (no silent fallback).
+- Core is the **meeting place**, not the owner of technology or tariff algebra.
+- Technologies and the utility block expose **`electricity_source_term` / `electricity_sink_term`** and **`objective_contribution`** (and related reporting expressions) so core stays declarative.
+- Loaders **normalize units** and keep per-timestep series **length-aligned** after optional `time_subset`.
+- **Fail fast** on invalid config, missing files, bad lengths, or inconsistent keys (no silent fallback).
 
-## Implementation Slices
+## Implementation status (living roadmap)
 
-Use this ordered roadmap for execution:
+### Done (baseline product)
 
-1. Scaffold and package hygiene
-2. Case config/discovery
-3. Data contract and minimum validation
-4. Data loading pipeline (load/resource/rates alignment)
-5. Core model assembly and registration interfaces
-6. Islanded electrical balance baseline
-7. Solar PV block
-8. Battery block
-9. Hydrokinetic block
-10. Hydrogen subsystem
-11. Diesel MILP block
-12. Runner + regression harness
-13. Remaining hydro family
-14. Network/multi-node expansion
+1. Package layout, case discovery, `pytest` + `pyproject.toml`.
+2. **`DataContainer`** with `validate_minimum_fields()`.
+3. Electricity **load** loader (CSV/XLSX/XLS), conditioning, multi-node keys (`electricity_load__*`).
+4. **Solar** resource loader aligned to load timestamps (time-of-year mapping); multi-profile keys (`solar_production__*`).
+5. **Utility** pipeline: OpenEI router + utility-specific parsers (e.g. SCE), **TOU** import prices from schedules, **raw** CSV price override, **`utility_tariffs`** + **`node_utility_tariff`** for per-meter tariffs.
+6. **Utility block**: energy imports, **flat / TOU / combined** demand charges, **fixed customer charges** (horizon USD); attaches when any of those apply.
+7. **Core** model: per-node electricity balance, optimizing + non-optimizing cost reporting.
+8. **Solar PV** block: per-node, per-profile capacity and generation; area limits; existing PV; optional capital recovery on existing.
+9. **Battery** block: SOC, charge/discharge, C-rates, adoption, optional initial SOC.
+10. **Diesel generator** block: multiple formulations (`diesel_lp`, `diesel_binary`, `diesel_unit_milp`), fuel economics, per-node limits.
+11. **Playground**: load → build → Gurobi solve → summary + optional diagnostics and CSV export.
+12. Example cases including **`max capability`** (stresses multi-node, multi-solar, battery, diesel, multi-tariff, financing).
 
-## Current Snapshot
+### In flight / tighten next
 
-As of this consolidation:
+- Broader **OpenEI utility** coverage and stricter validation of parsed shapes.
+- **Regression / benchmark** cases pinned to small horizons for CI performance.
+- **Diagnostics** coverage (tariffs, equipment costs) consistently surfaced in runs.
 
-- Implemented and active:
-  - Load loader (`energy_load`) with CSV/XLSX/XLS support and conditioning
-  - Solar resource loader (`resource_profiles`) aligned to load time vector
-  - Core model assembly (`model/core.py`) with node/time balance hooks
-  - Solar PV technology block with objective/source integration
-  - Utility-rate loader framework with initial SCE parser
-- Partial/in-progress:
-  - Utility rate robustness (shape handling, strict validation, tests)
-  - Additional technologies beyond solar
-  - Solve/report pipeline completion in `run/playground.py`
+### Next major slices (priority order — adjust as product needs change)
 
-## Quality Gates
+1. **Additional renewables** — e.g. wind: loader + `DataContainer` keys + technology block (same registration pattern as solar).
+2. **Export / sellback** — export energy variable and tariff-aware revenue (or credits) where data supports it.
+3. **Energy rate types** beyond TOU in the utility block — e.g. monthly/daily tiered energy already partially modeled in `ParsedRate`; wire full cost logic if not complete.
+4. **Hydrokinetic / river** resource and block (original DERopt scope).
+5. **Hydrogen** or other long-duration / fuel pathways — subsystem design TBD.
+6. **Physical network** — beyond “one meter per load column”: lines, losses, multi-bus OPF-style or transport approximations.
 
-Use these minimum gates before marking a slice complete:
+## Quality gates
 
-- Loader outputs are length-aligned to `|T|` and unit-normalized
-- No silent exception swallowing in critical orchestration paths
-- Contract tests cover malformed inputs and expected happy paths
-- Root `pytest` run is deterministic (`pytest.ini`-driven)
-- New module additions require fixture-based tests
+Before treating a slice as complete:
 
-## Extension Workflow
+- Loader outputs are **length-aligned** to `|T|` and **unit-normalized** as documented.
+- No silent exception swallowing on orchestration paths.
+- **Contract tests** for malformed inputs and at least one happy path per new loader or block.
+- **`pytest`** from repo root is deterministic (`pyproject.toml` / `pythonpath` for tests).
+- New technology or utility surface area includes **targeted tests** (unit + integration where feasible).
 
-When adding a technology or utility:
+## Extension workflow
 
-1. Add module file in `technologies/` or `utilities/`.
-2. Define inputs/parameters via config and validated data contract.
-3. Register balance and objective terms with core.
-4. Add targeted tests (unit + at least one integration/fixture test).
-5. Update this plan snapshot if milestone/state changed.
+When adding a technology or utility capability:
 
-## Decision Log (Active)
+1. Add or extend modules under `technologies/` or `data_loading/loaders/utility_rates/`.
+2. Define **defaults and validation** in an `inputs.py` (or loader-local validation) and merge from `technology_parameters` / case config.
+3. Register: **technology** → tuple in `technologies.REGISTRY`; **utility** → `@register_utility` parser returning **`ParsedRate`**.
+4. Ensure **`build_run_data`** populates everything the block needs on `DataContainer` (or `model` attachments from canonicalized data).
+5. Add tests; update **`README.md`** if user-facing behavior changes; update **this plan** and **`DEVELOPMENT.md`** if the architecture or workflow shifts.
 
-- Keep docs minimal: one `README.md` + one planning document (`docs/PLAN.md`).
-- Prefer fail-fast behavior over silent recovery in discovery/dispatch code.
-- Keep plugin-like dispatch for utility rates; enforce strict normalized output contracts.
+## Decision log (active)
+
+- **Docs set:** `README.md` (usage + data + config), `docs/DEVELOPMENT.md` (contributor map), `docs/PLAN.md` (this roadmap).
+- **Fail fast** over silent recovery in loaders, config resolution, and model build.
+- **Plugin-style** utility parsers with a strict **`ParsedRate`** contract; core and the utility block do not branch on utility names.
+- **Technologies are opt-in** via `technology_parameters`; key absent or `None` skips the block; `{}` uses module defaults.

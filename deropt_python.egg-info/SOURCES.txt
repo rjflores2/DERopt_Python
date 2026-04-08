@@ -36,10 +36,15 @@ technologies/compressed_gas_hydrogen_storage.py
 technologies/dam_hydro.py
 technologies/diesel_generation.py
 technologies/equipment_cost_diagnostics.py
-technologies/flow_battery_energy_storage.py
+technologies/flow_battery_energy_storage/__init__.py
+technologies/flow_battery_energy_storage/block.py
+technologies/flow_battery_energy_storage/diagnostics.py
+technologies/flow_battery_energy_storage/inputs.py
 technologies/gas_turbine.py
 technologies/high_temperature_fuel_cell.py
-technologies/hydrokinetic.py
+technologies/hydrokinetic/__init__.py
+technologies/hydrokinetic/block.py
+technologies/hydrokinetic/inputs.py
 technologies/pem_electrolyzer.py
 technologies/pem_fuel_cell.py
 technologies/pumped_hydro.py

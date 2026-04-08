@@ -21,10 +21,14 @@ Technology diagnostics (optional, plug-in style):
 
 from technologies.battery_energy_storage import register as register_battery_energy_storage
 from technologies.diesel_generator import register as register_diesel_generator
+from technologies.flow_battery_energy_storage import register as register_flow_battery_energy_storage
+from technologies.hydrokinetic import register as register_hydrokinetic
 from technologies.solar_pv import register as register_solar_pv
 
 REGISTRY = [
     ("solar_pv", register_solar_pv),
     ("battery_energy_storage", register_battery_energy_storage),
+    ("flow_battery_energy_storage", register_flow_battery_energy_storage),
     ("diesel_generator", register_diesel_generator),
+    ("hydrokinetic", register_hydrokinetic),
 ]

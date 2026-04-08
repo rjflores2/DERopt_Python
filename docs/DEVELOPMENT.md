@@ -1,49 +1,84 @@
 # For developers
 
-Short reference so you can find things and extend the code without hunting.
+Short reference so you can find things and extend the code without hunting. For milestones and roadmap, see **`docs/PLAN.md`**. For running cases and data formats, see **`README.md`**.
 
 ## Entry point
 
-- **Run a case:** `python -m run.playground` (default case from `DEROPT_CASE` env, or `Igiugig_xlsx`).
-- **Orchestration:** `run/playground.py` gets config → `run/build_run_data.py` fills one `DataContainer` → `model/core.build_model(data)` returns the Pyomo model.
+- **Run a case:** `python -m run.playground`  
+  Default case name comes from `DEROPT_CASE` (default in code: `Igiugig_xlsx` if unset).
+- **Pipeline:** `run/playground.py` → `get_case_config` → `build_run_data` → `build_model` → (optional) Gurobi → `extract_solution` / diagnostics.
+
+Unless `DEROPT_QUIET=1`, the playground prints **`electricity_load_keys`** and **`solar_production_keys`** after load—use those exact strings in `technology_parameters` (e.g. area limits, per-node maps).
 
 ## Where to add things
 
 | Want to… | Do this |
 |----------|--------|
-| **Add a new case** | Add `config/cases/<name>.py` with `def default_<name>_case(project_root: Path) -> CaseConfig`. Return a `CaseConfig`; no need to edit `__init__.py`—cases are auto-discovered by naming convention. |
-| **Add a new utility rate loader** | In `data_loading/loaders/utility_rates/` add a module (e.g. `pge.py`). Implement a loader that takes the rate item dict and returns a `ParsedRate`. Decorate it with `@register_utility("Utility Name")`. It will be picked up on import. |
-| **Add a new resource (e.g. wind)** | In `run/build_run_data.py`, add a branch after solar: load the file, merge into `data.timeseries` (and `data.static` keys) so the container stays the single source of truth. Add the corresponding technology block in `technologies/` and register it. |
-| **Subset the time horizon** | Set `case_cfg.time_subset = TimeSubsetConfig(months=[1,2], max_steps=744)` (or `iso_weeks=...`) in your case builder. Subsetting runs inside `build_run_data` after all loaders; it slices every per-timestep series including `data.import_prices`. |
+| **Add a new case** | Add `config/cases/<name>.py` with `def default_<name>_case(project_root: Path) -> CaseConfig`. The function name must follow that pattern (normalized case name: spaces/ hyphens → underscores). No edits to `config/cases/__init__.py` required. |
+| **Add a new technology** | Add a package under `technologies/<name>/` with `register(model, data, *, technology_parameters, financials)` that attaches a Pyomo `Block`. Append `("<config_key>", register)` to **`technologies.REGISTRY`** in `technologies/__init__.py`. Defaults and validation live in `inputs.py` beside the block. Optional: `collect_equipment_cost_diagnostics(model, data, case_cfg)` for `utilities.model_diagnostics`. |
+| **Add a new utility rate parser** | In `data_loading/loaders/utility_rates/`, add a module (e.g. `pge.py`). Implement a loader that takes the OpenEI **rate item** dict and returns **`ParsedRate`**. Decorate with `@register_utility("Utility Display Name")`. Import side effects register the parser. |
+| **Add a new time series resource (e.g. wind)** | Prefer extending **`run/build_run_data.py`** after solar: load file, write into `data.timeseries` and `data.static` keys, keep lengths equal to `len(data.indices["time"])`. Add a technology block and **`REGISTRY`** entry. |
+| **Subset the time horizon** | Set `case_cfg.time_subset = TimeSubsetConfig(months=[1, 2], max_steps=744)` and/or `iso_weeks=...` in the case builder. Subsetting runs at the end of `build_run_data` and slices aligned series (including **`import_prices`** and **`import_prices_by_node`**). |
+| **Per-node tariffs** | Use **`CaseConfig.utility_tariffs`** (list of **`UtilityTariffConfig`**) and optional **`node_utility_tariff`** map from node key → `tariff_key`. Do not set legacy `utility_rate_path` / `energy_price_path` on `CaseConfig` when using `utility_tariffs` (the loader raises if both are present). |
 
 ## Data flow
 
-1. **Config** (`config/case_config.py`, `config/cases/*.py`): `CaseConfig` holds paths and options (load, solar, utility rate, time subset, technology params, financials).
-2. **Data** (`run/build_run_data.py`): Builds one `DataContainer`: load → solar → utility (import prices + optional rate) → time subset. All per-timestep data (load, solar, import_prices) live in or on that container and stay aligned.
-3. **Model** (`model/core.py`): `build_model(data)` reads from `data` only (no separate rate/price args). It creates the time set, nodes, attaches technology blocks from the registry, and builds the balance constraints.
+1. **`CaseConfig`** (`config/case_config.py`, built in `config/cases/*.py`): paths for load and optional solar, optional `technology_parameters`, `financials`, `time_subset`, utility fields (single-tariff **or** `utility_tariffs` bundle).
+
+2. **`build_run_data`** (`run/build_run_data.py`):  
+   `load_energy_load` → optional `load_solar_into_container` → resolve utility(ies) into **`import_prices`** / **`import_prices_by_node`**, **`utility_rate`** / **`utility_rate_by_node`**, **`node_utility_tariff_key`** → optional **`apply_time_subset`**.
+
+3. **`build_model`** (`model/core.py`):  
+   Validates series lengths, attaches **`model.import_prices_by_node`** and **`model.utility_rate_by_node`**, iterates **`technologies.REGISTRY`** (skips keys where `technology_parameters[k] is None`), then calls **`utilities.electricity_import_export.register`**. Builds electricity balance and objective from block contributions.
+
+## Technology registry
+
+Configured keys today (see **`technologies/__init__.py`**):
+
+| Config key | Package |
+|------------|---------|
+| `solar_pv` | `technologies/solar_pv/` |
+| `battery_energy_storage` | `technologies/battery_energy_storage/` |
+| `diesel_generator` | `technologies/diesel_generator/` |
+
+The grid block is **not** in this registry; it is always registered from **`model.core`** via **`utilities.electricity_import_export`**, subject to whether prices/charges apply.
 
 ## Tests
 
 From project root:
 
 ```bash
+pip install -e ".[dev]"
 pytest
 ```
 
-If you use `pip install -e .`, the package is installed in editable mode so imports resolve and tests can run without `PYTHONPATH` hacks.
+`pyproject.toml` sets `pythonpath = ["."]` for pytest so imports resolve without manual `PYTHONPATH`.
 
-## Demand charge data (OpenEI to utility block)
+## ParsedRate and the utility block
 
-The SCE loader puts demand into `ParsedRate.demand` for the model utility block:
+Loaders return **`ParsedRate`** (`data_loading/loaders/utility_rates/openei_router.py`). Relevant fields:
 
-- **demand_type:** `"flat"` | `"tou"` | `"both"`.
-- **Flat:** `flatdemandstructure` (rate $/kW), `flat_demand_applicable_months` (month indices 0–11). The block adds one peak variable per applicable month and cost = rate × max demand in that month.
-- **TOU:** `demandratestructure` (tiers with rate $/kW), `demandweekdayschedule` / `demandweekendschedule` (12×24: schedule[month][hour] = tier). The block uses run `datetimes` to map each t to a tier and adds one peak variable per tier.
+### Energy (TOU)
 
-So the loader output is what the utility block expects; no extra demand processing is required.
+- **`rate_type`** includes `"tou"` for time-of-use energy; schedule and prices live in **`payload`** (SCE maps these for `get_import_prices_for_timestamps`).
+
+### Demand charges — **`demand_charges`** dict (not `demand`)
+
+When present, normalized keys include:
+
+- **`demand_charge_type`:** `"flat"` | `"tou"` | `"both"`.
+- **TOU:** `demand_charge_ratestructure`, `demand_charge_weekdayschedule`, `demand_charge_weekendschedule` (12×24: `[month][hour]` = tier index into the rate structure).
+- **Flat:** `flat_demand_charge_structure`, `flat_demand_charge_months`, `flat_demand_charge_applicable_months` (month indices 0–11).
+
+The utility block and **`demand_charge_indexing.py`** map run **`datetimes`** and **`time_step_hours`** to billing windows and peak proxy variables. See **`data_loading/loaders/utility_rates/sce.py`** for how OpenEI fields map into this shape.
+
+### Fixed and minimum charges
+
+- **`customer_fixed_charges`** — true fixed customer charges (e.g. first meter); horizon USD via **`customer_charge_horizon.fixed_customer_charges_horizon_usd`** and included in the utility objective when applicable.
+- **`minimum_meter_charge`** — metadata (minimum bill); **not** the same as daily/monthly fixed charges; treated separately from fixed horizon charges.
 
 ## Conventions
 
-- **Fail fast:** If config points to a file that doesn’t exist, or data is missing a required field, raise with a short message and the path/key. Don’t silently skip or default.
-- **One container:** Load, solar, utility (import prices, optional rate), and any future resources are all on `DataContainer`. The model only sees `data`.
-- **Single extension point for “run data”:** All loading and subsetting is in `build_run_data` so adding wind, hydro, or export rates doesn’t bloat the entry script.
+- **Fail fast:** Missing files, unknown keys in `node_utility_tariff`, length mismatches, or invalid parameters should **raise** with a short message.
+- **One container:** After `build_run_data`, **`DataContainer`** is the single source for series and static metadata the model consumes (plus attributes like **`import_prices_by_node`**).
+- **Single place for run data assembly:** Prefer extending **`build_run_data`** rather than growing **`playground.py`**.

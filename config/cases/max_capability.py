@@ -1,4 +1,4 @@
-"""Max-capability case: multi-node load, multi-profile solar, battery, and multi-tariff utility."""
+"""Max-capability case: multi-node load, multi-profile solar, battery, diesel, multi-tariff utility."""
 
 from pathlib import Path
 

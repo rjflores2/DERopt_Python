@@ -26,6 +26,8 @@ class FinancialsConfig:
 _LOAD_EXTENSIONS = (".csv", ".xlsx", ".xls")
 _LOAD_PATTERN = "loads"
 _SOLAR_PATTERN = "solar"
+# Hydrokinetic resource files: stem contains one of these (case-insensitive), e.g. hkt_potential.xlsx
+_HKT_STEM_SUBSTRINGS = ("hkt", "hydrokinetic")
 
 
 @dataclass(slots=True)
@@ -64,6 +66,14 @@ class CaseConfig:
     energy_load: EnergyLoadFileConfig
     # Optional resource profile files (e.g. solar.csv). Path only; loader infers format.
     solar_path: Path | None = None
+    # Optional hydrokinetic profiles: one column per river location (.csv / .xlsx / .xls).
+    hydrokinetic_path: Path | None = None
+    # HKT files: power (kW) per timestamp; divide by this before × time_step_hours → kWh/kW (see loader).
+    hydrokinetic_reference_kw: float = 1.0
+    # If set, use this column as timestamps; else auto-detect like solar/HKT loader.
+    hydrokinetic_datetime_column: str | None = None
+    # m² of the reference device used to produce the HKT resource file (scales kWh/kW → kWh/m²).
+    hydrokinetic_reference_swept_area_m2: float | None = None
     # Optional technology parameters by technology name, e.g. {"solar_pv": {...}}.
     # Values override technology defaults defined in each technology module.
     technology_parameters: dict[str, dict[str, Any]] | None = None
@@ -148,6 +158,34 @@ def discover_solar_file(folder: Path) -> Path | None:
         if f.suffix.lower() not in _LOAD_EXTENSIONS:
             continue
         if _SOLAR_PATTERN.lower() not in f.stem.lower():
+            continue
+        candidates.append(f)
+    if not candidates:
+        return None
+    for ext in (".xlsx", ".csv", ".xls"):
+        for c in candidates:
+            if c.suffix.lower() == ext:
+                return c
+    return candidates[0]
+
+
+def discover_hydrokinetic_file(folder: Path) -> Path | None:
+    """Find first csv/xlsx/xls whose stem contains 'hkt' or 'hydrokinetic' (case-insensitive).
+
+    Prefer xlsx > csv > xls. Returns None if no match (optional resource).
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return None
+    candidates: list[Path] = []
+    stem_lower: str
+    for f in folder.iterdir():
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in _LOAD_EXTENSIONS:
+            continue
+        stem_lower = f.stem.lower()
+        if not any(s in stem_lower for s in _HKT_STEM_SUBSTRINGS):
             continue
         candidates.append(f)
     if not candidates:

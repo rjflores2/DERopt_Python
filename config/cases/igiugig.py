@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from config.case_config import CaseConfig, EnergyLoadFileConfig, discover_solar_file
+from config.case_config import (
+    CaseConfig,
+    EnergyLoadFileConfig,
+    discover_hydrokinetic_file,
+    discover_solar_file,
+)
 
 
 def default_igiugig_case(project_root: Path) -> CaseConfig:
@@ -19,6 +24,7 @@ def default_igiugig_case(project_root: Path) -> CaseConfig:
             csv_path=data_dir / "Igiugig_Electric_Loads.csv"
         ),
         solar_path=discover_solar_file(data_dir),
+        hydrokinetic_path=discover_hydrokinetic_file(data_dir),
         technology_parameters={"solar_pv": {}},
         utility_rate_path=rate_path,
     )

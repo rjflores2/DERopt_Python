@@ -62,6 +62,29 @@ def test_negative_solar_capital_with_marginal_existing_recovery_still_builds():
     assert any("negative" in x.lower() for x in w)
 
 
+def test_negative_flow_battery_energy_capital_warns_after_successful_build():
+    data = DataContainer(
+        indices={"time": [0]},
+        timeseries={"time_serial": [0], "load_k": [1.0]},
+        static={"electricity_load_keys": ["load_k"], "time_step_hours": 1.0},
+        import_prices_by_node={"load_k": [0.0]},
+        utility_rate_by_node={"load_k": None},
+    )
+    tech = {
+        "flow_battery_energy_storage": {
+            "energy_capital_cost_per_kwh": -10.0,
+            "power_capital_cost_per_kw": 1.0,
+            "energy_om_per_kwh_year": 1.0,
+            "power_om_per_kw_year": 1.0,
+        }
+    }
+    model = build_model(data, technology_parameters=tech, financials={})
+    assert model is not None
+    case = SimpleNamespace(technology_parameters=tech)
+    w = collect_model_diagnostics(model, data, case)
+    assert any("negative" in x.lower() and "flow battery" in x.lower() for x in w)
+
+
 def test_negative_battery_capital_warns_after_successful_build():
     data = DataContainer(
         indices={"time": [0]},
