@@ -2,7 +2,7 @@
 
 Energy system optimization model that selects and sizes distributed energy resources (DERs) to meet electricity needs at lowest cost. Built with **Pyomo** and solved with **Gurobi**.
 
-The model currently includes **grid/utility imports** (energy, demand charges, fixed customer charges when tariff data provides them) and optional **technologies**: solar PV, battery energy storage, and diesel generation. Technologies are **opt-in** via `technology_parameters` on the case: each key may be `{}` (use module defaults), a dict of overrides, or `None` (omit that technology entirely).
+The model currently includes **grid/utility imports** (energy, demand charges, fixed customer charges when tariff data provides them) and optional **technologies**: solar PV, battery and flow-battery storage, diesel generation, **hydrokinetic** generation (when resource data is loaded), and a hydrogen subsystem (PEM/alkaline electrolyzers, PEM fuel cell, compressed-gas hydrogen storage). Technologies are **opt-in** via `CaseConfig.technology_parameters`; see **[Technology parameters](#technology-parameters)** for exact semantics.
 
 ## Quick Start
 
@@ -72,12 +72,24 @@ Use consistent column names in solar files so case config (e.g. `max_capacity_ar
 
 Use the **resulting key** in config when keying by profile name (e.g. in `max_capacity_area_by_node_and_profile`). Column order defines `solar_production_keys`, which matters if you use a **list** for `params_by_profile` (see below).
 
+### Hydrokinetic resource files (optional)
+
+- When a case sets `hydrokinetic_path` and the loader runs (`run/build_run_data.py`), time series are aligned like solar; `data.static["hydrokinetic_production_keys"]` lists profile keys. See loaders and `technologies/hydrokinetic/` for required static metadata (e.g. reference kW / swept area) when building that block.
+
 ## Technology parameters
 
-Technologies are configured under `CaseConfig.technology_parameters` with keys matching `technologies.REGISTRY`: `solar_pv`, `battery_energy_storage`, `diesel_generator`.
+Technologies are configured under `CaseConfig.technology_parameters`. Config keys must match `technologies.REGISTRY`: `solar_pv`, `battery_energy_storage`, `flow_battery_energy_storage`, `diesel_generator`, `hydrokinetic`, `pem_electrolyzer`, `alkaline_electrolyzer`, `pem_fuel_cell`, `compressed_gas_hydrogen_storage`.
 
-- **`{}` or omitted fields**: merged with defaults in each technology’s `inputs.py`.
-- **`None` for a technology key**: that technology block is not built.
+**Semantics (per technology key):**
+
+| Config | Meaning |
+|--------|--------|
+| **Key omitted** | Do not build that technology (same as leaving it out of the dict). |
+| **`None`** | Explicitly do **not** build that technology. |
+| **`{}`** | Build the technology using **module defaults** from that package’s `inputs.py` (empty dict still counts as “requested”). |
+| **Non-empty `dict`** | Build the technology; merge these values onto the same defaults. |
+
+**Requested technologies and resource data:** If a technology is requested with `{}` or a non-empty dict, `build_model` expects its `register()` hook to attach `model.<technology_name>` (see `model/core.py`). For **resource-dependent** technologies (e.g. `solar_pv` without `solar_production_keys`, `hydrokinetic` without `hydrokinetic_production_keys`), the register function cannot build a block; the run **raises a clear `ValueError`** instead of silently skipping. That is intentional so a requested DER is never dropped without notice. Case builders should only pass `solar_pv` / `hydrokinetic` when the corresponding data was loaded into `DataContainer`, or set the key to `None` / omit it.
 
 Financing for annualized capital on adopted equipment uses `CaseConfig.financials` (`FinancialsConfig`: debt/equity terms). If unset, defaults from `config/case_config.py` apply.
 
@@ -126,6 +138,48 @@ Defaults and validation: `technologies/diesel_generator/inputs.py`.
 - **`formulation`** (exact strings): `diesel_lp`, `diesel_binary`, or `diesel_unit_milp`.
 - **Fuel economics**: usually `fuel_cost_per_gallon` with heating-value conversion to \$/kWh, or a direct override `fuel_cost_per_kwh_diesel` (do not mix both).
 - Optional per-node **existing** capacity / unit counts and **adoption limits** (capacity and discrete units), depending on formulation.
+
+### Hydrogen subsystem (LHV basis)
+
+Hydrogen technologies use **kWh-H2 on a lower heating value basis** (`kWh-H2_LHV`) as the canonical internal unit for hydrogen production, consumption, storage inventory, and hydrogen balance terms. HHV is not used internally.
+
+**Formulation strings** match the diesel pattern: **`<technology>_<model>`** as exact literals (no aliases), e.g. `diesel_lp` for diesel and `pem_electrolyzer_lp` for the PEM electrolyzer.
+
+#### PEM electrolyzer (`pem_electrolyzer`)
+
+Defaults and validation: `technologies/pem_electrolyzer/inputs.py`; block: `technologies/pem_electrolyzer/block.py`.
+
+- Produces hydrogen (`hydrogen_source_term`) and consumes electricity (`electricity_sink_term`).
+- **`formulation`** (exact strings): `pem_electrolyzer_lp`, `pem_electrolyzer_binary`, or `pem_electrolyzer_unit_milp`.
+- `pem_electrolyzer_binary` big-M uses node peak electric load multiplied by `electrolyzer_binary_big_m_load_multiplier` (default 15) to allow renewable-overbuild charging behavior.
+- Uses `electric_to_hydrogen_lhv_efficiency` = (kWh-H2_LHV out)/(kWh-electric in).
+
+#### Alkaline electrolyzer (`alkaline_electrolyzer`)
+
+Defaults and validation: `technologies/alkaline_electrolyzer/inputs.py`; block: `technologies/alkaline_electrolyzer/block.py`.
+
+- Same structure as PEM with different defaults.
+- **`formulation`**: `alkaline_electrolyzer_lp`, `alkaline_electrolyzer_binary`, or `alkaline_electrolyzer_unit_milp`.
+- Produces hydrogen (`hydrogen_source_term`) and consumes electricity (`electricity_sink_term`).
+- Uses the same LHV efficiency convention and binary big-M pattern as PEM.
+
+#### PEM fuel cell (`pem_fuel_cell`)
+
+Defaults and validation: `technologies/pem_fuel_cell/inputs.py`; block: `technologies/pem_fuel_cell/block.py`.
+
+- Consumes hydrogen (`hydrogen_sink_term`) and produces electricity (`electricity_source_term`).
+- **`formulation`**: `pem_fuel_cell_lp`, `pem_fuel_cell_binary`, or `pem_fuel_cell_unit_milp`.
+- `pem_fuel_cell_binary` big-M is based on node peak electric load.
+- Uses `hydrogen_lhv_to_electric_efficiency` = (kWh-electric out)/(kWh-H2_LHV in).
+
+#### Compressed-gas hydrogen storage (`compressed_gas_hydrogen_storage`)
+
+Defaults and validation: `technologies/compressed_gas_hydrogen_storage/inputs.py`; block: `technologies/compressed_gas_hydrogen_storage/block.py`.
+
+- Hydrogen inventory model (analogous to battery SOC, but in kWh-H2_LHV).
+- Exposes `hydrogen_sink_term` (charge), `hydrogen_source_term` (discharge).
+- Charging incurs compressor electricity via `electricity_sink_term` with coefficient `compression_kwh_electric_per_kwh_h2_lhv`.
+- Includes retention/standing-loss and min/max inventory fractions.
 
 ### Utility tariffs (single and multi-node)
 
@@ -181,6 +235,7 @@ The codebase is written to **fail fast with clear errors** instead of allowing s
 - **Data validation:** Loaders and the model validate required fields (e.g. `electricity_load_keys`, `time`, `time_serial`) and **raise** with a clear message if something is missing. The model calls `data.validate_minimum_fields()` at entry so invalid data never propagates into the build.
 - **Loader and API contracts:** When a function is required to return a specific type (e.g. `ParsedRate` from a utility loader), we check the return value and **raise** with a descriptive error if it is `None` or the wrong type, rather than passing it downstream.
 - **Defensive checks:** For example, if `build_model` is called with data and returns `None`, the playground raises instead of continuing; technology parameter validation (e.g. solar efficiency in (0, 1]) raises so bad config is caught at build time.
+- **Requested registry technologies:** If `technology_parameters` includes a key with value **`{}` or a config dict** (not `None`), the technology’s `register()` must attach **`model.<technology_name>`** and return that same block; otherwise `build_model` raises. Conditional technologies must not appear in `technology_parameters` unless the run data supports them (see [Technology parameters](#technology-parameters)).
 
 When adding or changing code, prefer **explicit validation and early raises** over defaulting or continuing with invalid or missing data.
 
@@ -192,7 +247,7 @@ When adding or changing code, prefer **explicit validation and early raises** ov
 | `data/` | Local input data (gitignored); load profiles, rates, etc. |
 | `data_loading/` | Loaders that read data and populate the DataContainer |
 | `model/` | Pyomo model assembly (`core.py` is the central meeting place) |
-| `technologies/` | Technology modules: solar PV, battery storage, diesel generator (`REGISTRY` in `technologies/__init__.py`) |
+| `technologies/` | Technology modules (solar, storage, diesel, hydrokinetic, hydrogen subsystem); `REGISTRY` in `technologies/__init__.py` |
 | `utilities/` | Grid/tariff; `electricity_import_export/` mirrors tech packages (`block`, `inputs`, `demand_charge_indexing`, diagnostics) |
 | `run/playground.py` | Main entry point |
 | `shared/` | Shared utilities (e.g. financials) |

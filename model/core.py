@@ -1,8 +1,9 @@
 """Core model assembly: sets, optional technology blocks, and registration.
 
-Builds a Pyomo ConcreteModel with time set T. When data is provided and contains
-solar resource data, the Solar PV block is attached. Generation from the solar
-block is exposed for use in the electricity balance (in core or a separate balance module).
+Builds a Pyomo ConcreteModel with time set T. Technology blocks are attached from the
+registry when listed in ``technology_parameters``. The model enforces an **electricity**
+balance and a **hydrogen** balance (kWh-H2 LHV per timestep) by summing
+``electricity_*_term`` / ``hydrogen_*_term`` contributions on each top-level block.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ import pyomo.environ as pyo
 if TYPE_CHECKING:
     from data_loading.schemas import DataContainer
 
+from .contracts import validate_technology_block_interface
+
 
 def build_model(
     data: DataContainer,
@@ -23,7 +26,9 @@ def build_model(
 ) -> pyo.ConcreteModel:
     """Build a Pyomo model with time set T and attach technology blocks when data supports them.
 
-    Technologies: only those in technology_parameters with a non-None value are included; use {} for defaults.
+    Technologies: for each registry name, ``technology_parameters.get(name)`` must be non-``None`` to build
+    (missing key omits). Use ``{}`` for module defaults; explicit ``None`` omits. If a technology is requested
+    but ``register`` returns ``None`` without attaching ``model.<name>``, this raises (see README).
     Utility data (node-scoped prices/rates) is read from data so the model has a single data contract.
     """
     # Fail fast if required data fields are missing (don't propagate bad data downstream).
@@ -83,12 +88,49 @@ def build_model(
         # Skip techs not listed in config or explicitly set to None.
         if tech_params.get(technology_name) is None:
             continue
-        register_fn(
+        returned = register_fn(
             model,
             data,
             technology_parameters=tech_params,
             financials=fin,
         )
+        blk = getattr(model, technology_name, None)
+        if returned is not None:
+            if blk is None:
+                raise ValueError(
+                    f"technology {technology_name!r}: register() returned a Block but "
+                    f"model.{technology_name!r} is missing. Registry hooks must assign "
+                    f"model.{technology_name} = <Block> to the same object they return."
+                )
+            if not isinstance(blk, pyo.Block):
+                raise ValueError(
+                    f"technology {technology_name!r}: model.{technology_name!r} must be a "
+                    f"pyo.Block when register() returns a block; got {type(blk).__name__!r}."
+                )
+            if returned is not blk:
+                raise ValueError(
+                    f"technology {technology_name!r}: register() must return the exact Block "
+                    f"attached as model.{technology_name!r} (identity mismatch)."
+                )
+            validate_technology_block_interface(
+                technology_key=technology_name,
+                block=blk,
+                model=model,
+            )
+        elif blk is not None:
+            raise ValueError(
+                f"technology {technology_name!r}: register() returned None but "
+                f"model.{technology_name!r} exists. Remove the stray attribute or return "
+                f"that Block from register()."
+            )
+        else:
+            raise ValueError(
+                f"technology {technology_name!r} was requested in technology_parameters but "
+                f"register() returned None and model.{technology_name!r} was not attached. "
+                f"Registry technologies must attach and return the same pyo.Block as "
+                f"model.{technology_name!r}, or set technology_parameters[{technology_name!r}] "
+                f"to None when this technology cannot be built for the given data."
+            )
 
     # Grid/utility block: grid_import variable, energy cost (import_prices), demand charges (from utility_rate.demand_charges).
     # Attach when we have import_prices or demand-charge data so balance can include grid and objective includes utility cost.
@@ -143,6 +185,35 @@ def build_model(
     model.electricity_balance = pyo.Constraint(
         model.NODES, model.T, rule=_electricity_energy_balance_rule
     )
+
+    # -------------------------------------------------------------------------
+    # Hydrogen balance: sources == sinks (per node, per time), LHV basis
+    # All participating technologies use kWh-H2_LHV (lower heating value) per timestep.
+    # Blocks that do not define hydrogen_source_term / hydrogen_sink_term are skipped.
+    # With no hydrogen technologies registered, sources and sinks are both zero at each (node, t).
+    # -------------------------------------------------------------------------
+    def _hydrogen_sources_rule(m, n, t):
+        total = 0.0
+        for blk in m.component_objects(pyo.Block, descend_into=False):
+            if hasattr(blk, "hydrogen_source_term"):
+                total += blk.hydrogen_source_term[n, t]
+        return total
+
+    model.hydrogen_sources = pyo.Expression(model.NODES, model.T, rule=_hydrogen_sources_rule)
+
+    def _hydrogen_sinks_rule(m, n, t):
+        total = 0.0
+        for blk in m.component_objects(pyo.Block, descend_into=False):
+            if hasattr(blk, "hydrogen_sink_term"):
+                total += blk.hydrogen_sink_term[n, t]
+        return total
+
+    model.hydrogen_sinks = pyo.Expression(model.NODES, model.T, rule=_hydrogen_sinks_rule)
+
+    def _hydrogen_balance_rule(m, n, t):
+        return m.hydrogen_sources[n, t] == m.hydrogen_sinks[n, t]
+
+    model.hydrogen_balance = pyo.Constraint(model.NODES, model.T, rule=_hydrogen_balance_rule)
 
     # -------------------------------------------------------------------------
     # Objective: minimize total cost (sum of objective_contribution from all

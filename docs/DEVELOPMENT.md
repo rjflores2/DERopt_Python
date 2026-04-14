@@ -29,7 +29,16 @@ Unless `DEROPT_QUIET=1`, the playground prints **`electricity_load_keys`** and *
    `load_energy_load` → optional `load_solar_into_container` → resolve utility(ies) into **`import_prices`** / **`import_prices_by_node`**, **`utility_rate`** / **`utility_rate_by_node`**, **`node_utility_tariff_key`** → optional **`apply_time_subset`**.
 
 3. **`build_model`** (`model/core.py`):  
-   Validates series lengths, attaches **`model.import_prices_by_node`** and **`model.utility_rate_by_node`**, iterates **`technologies.REGISTRY`** (skips keys where `technology_parameters[k] is None`), then calls **`utilities.electricity_import_export.register`**. Builds electricity balance and objective from block contributions.
+   Validates series lengths, attaches **`model.import_prices_by_node`** and **`model.utility_rate_by_node`**, iterates **`technologies.REGISTRY`**, then calls **`utilities.electricity_import_export.register`**. Builds electricity and hydrogen balances plus objective from block contributions.
+
+### `technology_parameters` and the registry loop
+
+For each `(technology_name, register_fn)` in **`REGISTRY`**, `build_model` runs the register function **only if** `technology_parameters.get(technology_name)` is **not** `None` (a missing key is the same as “do not build”). Values:
+
+- **Missing key or `None`** — skip; do not call register for that name (`technology_parameters.get(...)` is `None`).
+- **`{}` or any `dict`** — call `register(...)`. The hook **must** attach **`model.<technology_name>`** as a `pyo.Block` and **return that same object**. If register returns `None` and nothing is attached (e.g. solar requested but `solar_production_keys` never loaded), **`build_model` raises** — no silent omission of a requested technology.
+
+Optional block interface checks: **`model/contracts.validate_technology_block_interface`** after a successful attach.
 
 ## Technology registry
 
@@ -39,9 +48,24 @@ Configured keys today (see **`technologies/__init__.py`**):
 |------------|---------|
 | `solar_pv` | `technologies/solar_pv/` |
 | `battery_energy_storage` | `technologies/battery_energy_storage/` |
+| `flow_battery_energy_storage` | `technologies/flow_battery_energy_storage/` |
 | `diesel_generator` | `technologies/diesel_generator/` |
+| `hydrokinetic` | `technologies/hydrokinetic/` |
+| `pem_electrolyzer` | `technologies/pem_electrolyzer/` |
+| `alkaline_electrolyzer` | `technologies/alkaline_electrolyzer/` |
+| `pem_fuel_cell` | `technologies/pem_fuel_cell/` |
+| `compressed_gas_hydrogen_storage` | `technologies/compressed_gas_hydrogen_storage/` |
 
-The grid block is **not** in this registry; it is always registered from **`model.core`** via **`utilities.electricity_import_export`**, subject to whether prices/charges apply.
+The grid block is **not** in this registry; **`model.core`** calls **`utilities.electricity_import_export.register`**, which attaches the utility block only when resolved inputs require it (energy prices, demand charges, and/or fixed customer charges); otherwise it may attach nothing.
+
+### Hydrogen modeling convention
+
+- Canonical hydrogen unit is **`kWh-H2_LHV`** (lower heating value basis) across electrolyzers, fuel cells, storage, and core hydrogen balance.
+- Blocks that define hydrogen terms expose **`hydrogen_source_term`** and/or **`hydrogen_sink_term`** by `(node, t)`.
+- **`formulation`** values for electrolyzers and the PEM fuel cell use the same pattern as diesel: **`<technology>_<model>`** as exact strings (e.g. `pem_electrolyzer_lp`, `alkaline_electrolyzer_binary`, `pem_fuel_cell_unit_milp`); no short aliases.
+- Electrolyzer/fuel-cell binary formulations use big-M linearization:
+  - fuel cell big-M from node peak electric load;
+  - electrolyzer big-M from node peak electric load times configurable multiplier.
 
 ## Tests
 

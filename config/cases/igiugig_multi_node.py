@@ -16,34 +16,29 @@ def default_igiugig_multi_node_case(project_root: Path) -> CaseConfig:
     rate_path = data_dir / "SCE_D_TOU.json"
     if not rate_path.is_file():
         rate_path = None
-    return CaseConfig(
-        case_name="Igiugig Multi Node",
-        energy_load=EnergyLoadFileConfig(
-            csv_path=data_dir / "Igiugig_Electric_Loads.csv"
-        ),
-        solar_path=discover_solar_file(data_dir),
-        hydrokinetic_path=discover_hydrokinetic_file(data_dir),
-        utility_rate_path=rate_path,
-        # Example: override solar PV parameters (order of params_by_profile = order of solar columns in data).
-        technology_parameters={
+    solar_path = discover_solar_file(data_dir)
+    tech_params = None
+    if solar_path is not None:
+        tech_params = {
             "solar_pv": {
                 "params_by_profile": [
                     {"efficiency": 0.20, "capital_cost_per_kw": 1500.0, "om_per_kw_year": 18.0},
                     {"efficiency": 0.22, "capital_cost_per_kw": 2100.0, "om_per_kw_year": 24.0},
                 ],
-                # Per-node, per-profile solar area limits (m²). Keys must match data.static["electricity_load_keys"]
-                # and data.static["solar_production_keys"] from the load and solar data.
                 "max_capacity_area_by_node_and_profile": {
                     "electricity_load__node_1": {"solar_production__fixed_kw_kw": 120.0, "solar_production__1d_tracking_kw_kw": 80.0},
                     "electricity_load__node_2": {"solar_production__fixed_kw_kw": 95.0, "solar_production__1d_tracking_kw_kw": 60.0},
                     "electricity_load__node_3": {"solar_production__fixed_kw_kw": 150.0, "solar_production__1d_tracking_kw_kw": 100.0},
                 },
-                # Optional: existing solar capacity (kW) at each node per profile. Omit or use 0 for none.
-                # "existing_solar_capacity_by_node_and_profile": {
-                #     "electricity_load__node_1": {"solar_production__fixed_kw_kw": 0.0, "solar_production__1d_tracking_kw_kw": 0.0},
-                #     "electricity_load__node_2": {"solar_production__fixed_kw_kw": 10.0, "solar_production__1d_tracking_kw_kw": 0.0},
-                #     "electricity_load__node_3": {"solar_production__fixed_kw_kw": 0.0, "solar_production__1d_tracking_kw_kw": 0.0},
-                # },
             },
-        },
+        }
+    return CaseConfig(
+        case_name="Igiugig Multi Node",
+        energy_load=EnergyLoadFileConfig(
+            csv_path=data_dir / "Igiugig_Electric_Loads.csv"
+        ),
+        solar_path=solar_path,
+        hydrokinetic_path=discover_hydrokinetic_file(data_dir),
+        utility_rate_path=rate_path,
+        technology_parameters=tech_params,
     )

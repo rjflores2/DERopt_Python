@@ -5,7 +5,7 @@ Single planning document for the Python/Pyomo rebuild. **`README.md`** is the op
 ## Purpose
 
 - Rebuild DERopt in Python using **Pyomo**, solved with **Gurobi**.
-- Keep **`model/core.py`** generic: time and nodes, electricity balance, objective aggregation, and registration of blocks.
+- Keep **`model/core.py`** generic: time and nodes, electricity/hydrogen balances, objective aggregation, and registration of blocks.
 - Put **technology** and **utility** logic in dedicated packages with a small, repeatable contract (balance terms, objective terms, optional diagnostics).
 - Support **staged delivery** with testable milestones and a **fail-fast** data/config contract.
 
@@ -27,7 +27,7 @@ Repository structure and ownership:
 Design rules:
 
 - Core is the **meeting place**, not the owner of technology or tariff algebra.
-- Technologies and the utility block expose **`electricity_source_term` / `electricity_sink_term`** and **`objective_contribution`** (and related reporting expressions) so core stays declarative.
+- Technologies and the utility block expose balance terms (e.g. **`electricity_source_term` / `electricity_sink_term`**, **`hydrogen_source_term` / `hydrogen_sink_term`**) plus **`objective_contribution`** (and related reporting expressions) so core stays declarative.
 - Loaders **normalize units** and keep per-timestep series **length-aligned** after optional `time_subset`.
 - **Fail fast** on invalid config, missing files, bad lengths, or inconsistent keys (no silent fallback).
 
@@ -39,14 +39,16 @@ Design rules:
 2. **`DataContainer`** with `validate_minimum_fields()`.
 3. Electricity **load** loader (CSV/XLSX/XLS), conditioning, multi-node keys (`electricity_load__*`).
 4. **Solar** resource loader aligned to load timestamps (time-of-year mapping); multi-profile keys (`solar_production__*`).
-5. **Utility** pipeline: OpenEI router + utility-specific parsers (e.g. SCE), **TOU** import prices from schedules, **raw** CSV price override, **`utility_tariffs`** + **`node_utility_tariff`** for per-meter tariffs.
-6. **Utility block**: energy imports, **flat / TOU / combined** demand charges, **fixed customer charges** (horizon USD); attaches when any of those apply.
-7. **Core** model: per-node electricity balance, optimizing + non-optimizing cost reporting.
-8. **Solar PV** block: per-node, per-profile capacity and generation; area limits; existing PV; optional capital recovery on existing.
-9. **Battery** block: SOC, charge/discharge, C-rates, adoption, optional initial SOC.
-10. **Diesel generator** block: multiple formulations (`diesel_lp`, `diesel_binary`, `diesel_unit_milp`), fuel economics, per-node limits.
-11. **Playground**: load → build → Gurobi solve → summary + optional diagnostics and CSV export.
-12. Example cases including **`max capability`** (stresses multi-node, multi-solar, battery, diesel, multi-tariff, financing).
+5. **Hydrokinetic** resource loader and technology block (multi-profile keys, formulations aligned with other DER registry patterns).
+6. **Utility** pipeline: OpenEI router + utility-specific parsers (e.g. SCE), **TOU** import prices from schedules, **raw** CSV price override, **`utility_tariffs`** + **`node_utility_tariff`** for per-meter tariffs.
+7. **Utility block**: energy imports, **flat / TOU / combined** demand charges, **fixed customer charges** (horizon USD); attaches when any of those apply.
+8. **Core** model: per-node electricity and hydrogen balances, optimizing + non-optimizing cost reporting; registry technologies validated on attach (`model/contracts.py`).
+9. **Solar PV** block: per-node, per-profile capacity and generation; area limits; existing PV; optional capital recovery on existing.
+10. **Battery** and **flow-battery** blocks: SOC / charge / discharge, C-rates, adoption.
+11. **Diesel generator** block: multiple formulations (`diesel_lp`, `diesel_binary`, `diesel_unit_milp`), fuel economics, per-node limits.
+12. **Playground**: load → build → Gurobi solve → summary + optional diagnostics and CSV export.
+13. Example cases including **`max capability`** (stresses multi-node, multi-solar, battery, diesel, multi-tariff, financing); hydrogen technologies are in the registry for case builders but are not required in shipped examples.
+14. **Hydrogen subsystem**: PEM electrolyzer, alkaline electrolyzer, PEM fuel cell, and compressed-gas H2 storage with canonical **kWh-H2_LHV** basis and core hydrogen balance; electrolyzer/fuel-cell **`formulation`** strings follow the diesel **`technology_model`** pattern (e.g. `pem_electrolyzer_lp`).
 
 ### In flight / tighten next
 
@@ -56,12 +58,11 @@ Design rules:
 
 ### Next major slices (priority order — adjust as product needs change)
 
-1. **Additional renewables** — e.g. wind: loader + `DataContainer` keys + technology block (same registration pattern as solar).
+1. **Additional renewables** — e.g. wind: loader + `DataContainer` keys + technology block (same registration pattern as solar / hydrokinetic).
 2. **Export / sellback** — export energy variable and tariff-aware revenue (or credits) where data supports it.
 3. **Energy rate types** beyond TOU in the utility block — e.g. monthly/daily tiered energy already partially modeled in `ParsedRate`; wire full cost logic if not complete.
-4. **Hydrokinetic / river** resource and block (original DERopt scope).
-5. **Hydrogen** or other long-duration / fuel pathways — subsystem design TBD.
-6. **Physical network** — beyond “one meter per load column”: lines, losses, multi-bus OPF-style or transport approximations.
+4. **Hydrogen — next modeling** — exogenous hydrogen demand, additional storage forms, reporting conversions (e.g. kg-H2 via explicit LHV conversion).
+5. **Physical network** — beyond “one meter per load column”: lines, losses, multi-bus OPF-style or transport approximations.
 
 ## Quality gates
 
@@ -88,4 +89,4 @@ When adding a technology or utility capability:
 - **Docs set:** `README.md` (usage + data + config), `docs/DEVELOPMENT.md` (contributor map), `docs/PLAN.md` (this roadmap).
 - **Fail fast** over silent recovery in loaders, config resolution, and model build.
 - **Plugin-style** utility parsers with a strict **`ParsedRate`** contract; core and the utility block do not branch on utility names.
-- **Technologies are opt-in** via `technology_parameters`; key absent or `None` skips the block; `{}` uses module defaults.
+- **Technologies are opt-in** via `technology_parameters`: absent key or **`None`** skips; **`{}` or a dict** requests a build and **must** result in an attached `model.<name>` block or `build_model` raises (no silent skip for resource-dependent tech when requested).
