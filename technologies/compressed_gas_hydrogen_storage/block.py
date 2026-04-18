@@ -19,12 +19,18 @@ from typing import Any
 
 import pyomo.environ as pyo
 
+from data_loading.schemas import DataContainer
+from shared.cost_helpers import (
+    annualized_fixed_cost_by_node,
+    attach_standard_cost_expressions,
+)
+
 from .inputs import resolve_compressed_gas_hydrogen_storage_block_inputs
 
 
 def add_compressed_gas_hydrogen_storage_block(
-    model: Any,
-    data: Any,
+    model: pyo.Block,
+    data: DataContainer,
     *,
     compressed_gas_hydrogen_storage_params: dict[str, Any] | None = None,
     financials: dict[str, Any] | None = None,
@@ -84,43 +90,43 @@ def add_compressed_gas_hydrogen_storage_block(
         h2_block.charge_efficiency = pyo.Param(
             initialize=resolved.charge_efficiency,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.discharge_efficiency = pyo.Param(
             initialize=resolved.discharge_efficiency,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.max_hydrogen_charge_per_kwh_capacity = pyo.Param(
             initialize=resolved.max_hydrogen_charge_per_kwh_capacity,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.max_hydrogen_discharge_per_kwh_capacity = pyo.Param(
             initialize=resolved.max_hydrogen_discharge_per_kwh_capacity,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.hydrogen_inventory_retention = pyo.Param(
             initialize=resolved.hydrogen_inventory_retention,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.minimum_hydrogen_inventory_fraction = pyo.Param(
             initialize=resolved.minimum_hydrogen_inventory_fraction,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.maximum_hydrogen_inventory_fraction = pyo.Param(
             initialize=resolved.maximum_hydrogen_inventory_fraction,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.existing_energy_capacity_kwh_h2_lhv = pyo.Param(
             nodes,
             initialize=resolved.existing_energy_capacity_kwh_h2_lhv,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.capital_cost_per_kwh_h2_lhv = pyo.Param(
             initialize=resolved.capital_cost_per_kwh_h2_lhv,
@@ -135,19 +141,19 @@ def add_compressed_gas_hydrogen_storage_block(
         h2_block.amortization_factor = pyo.Param(
             initialize=resolved.amortization_factor,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         h2_block.compression_kwh_electric_per_kwh_h2_lhv = pyo.Param(
             initialize=resolved.compression_kwh_electric_per_kwh_h2_lhv,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
 
         if resolved.initial_hydrogen_inventory_fraction is not None:
             h2_block.initial_hydrogen_inventory_fraction = pyo.Param(
                 initialize=resolved.initial_hydrogen_inventory_fraction,
                 within=pyo.NonNegativeReals,
-                mutable=True,
+                mutable=False,
             )
 
         h2_block.hydrogen_inventory_kwh_h2_lhv = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
@@ -182,14 +188,20 @@ def add_compressed_gas_hydrogen_storage_block(
         h2_block.hydrogen_inventory_minimum = pyo.Constraint(nodes, T, rule=inventory_minimum_rule)
         h2_block.hydrogen_inventory_maximum = pyo.Constraint(nodes, T, rule=inventory_maximum_rule)
 
+        # C-rate (1/hour): max kWh-H2 charged per hour per kWh capacity. Multiply by
+        # ``time_step_hours`` to bound the kWh-H2-per-timestep flow variable.
         def hydrogen_charge_limit_rule(m, node, t):
             return m.hydrogen_charge_flow[node, t] <= (
-                m.max_hydrogen_charge_per_kwh_capacity * m.total_energy_capacity_kwh_h2_lhv[node]
+                m.max_hydrogen_charge_per_kwh_capacity
+                * m.total_energy_capacity_kwh_h2_lhv[node]
+                * model.time_step_hours
             )
 
         def hydrogen_discharge_limit_rule(m, node, t):
             return m.hydrogen_discharge_flow[node, t] <= (
-                m.max_hydrogen_discharge_per_kwh_capacity * m.total_energy_capacity_kwh_h2_lhv[node]
+                m.max_hydrogen_discharge_per_kwh_capacity
+                * m.total_energy_capacity_kwh_h2_lhv[node]
+                * model.time_step_hours
             )
 
         h2_block.hydrogen_charge_limit = pyo.Constraint(nodes, T, rule=hydrogen_charge_limit_rule)
@@ -228,40 +240,34 @@ def add_compressed_gas_hydrogen_storage_block(
             rule=lambda m, node, t: m.compression_kwh_electric_per_kwh_h2_lhv * m.hydrogen_charge_flow[node, t],
         )
 
+        annualized_capital_if_adopted = None
+        fixed_om_adopted_if_adopted = None
         if allow_adoption:
-            h2_block.h2_storage_capital_costs = pyo.Expression(
-                expr=sum(
-                    h2_block.capital_cost_per_kwh_h2_lhv
-                    * h2_block.energy_capacity_adopted_kwh_h2_lhv[node]
-                    * h2_block.amortization_factor
-                    for node in nodes
-                )
+            annualized_capital_if_adopted = annualized_fixed_cost_by_node(
+                cost_per_unit=h2_block.capital_cost_per_kwh_h2_lhv,
+                capacity_var=h2_block.energy_capacity_adopted_kwh_h2_lhv,
+                nodes=nodes,
+                amortization_factor=h2_block.amortization_factor,
             )
-            h2_block.h2_storage_fixed_operations_and_maintenance = pyo.Expression(
-                expr=sum(
-                    h2_block.om_per_kwh_h2_lhv_year * h2_block.energy_capacity_adopted_kwh_h2_lhv[node]
-                    for node in nodes
-                )
+            fixed_om_adopted_if_adopted = annualized_fixed_cost_by_node(
+                cost_per_unit=h2_block.om_per_kwh_h2_lhv_year,
+                capacity_var=h2_block.energy_capacity_adopted_kwh_h2_lhv,
+                nodes=nodes,
             )
-            h2_block.objective_contribution = pyo.Expression(
-                expr=h2_block.h2_storage_capital_costs + h2_block.h2_storage_fixed_operations_and_maintenance
-            )
-            h2_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(
-                    h2_block.om_per_kwh_h2_lhv_year * h2_block.existing_energy_capacity_kwh_h2_lhv[node]
-                    for node in nodes
-                )
-            )
-        else:
-            h2_block.h2_storage_capital_costs = pyo.Expression(expr=0.0)
-            h2_block.h2_storage_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
-            h2_block.objective_contribution = pyo.Expression(expr=0.0)
-            h2_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(
-                    h2_block.om_per_kwh_h2_lhv_year * h2_block.existing_energy_capacity_kwh_h2_lhv[node]
-                    for node in nodes
-                )
-            )
+
+        fixed_om_existing = annualized_fixed_cost_by_node(
+            cost_per_unit=h2_block.om_per_kwh_h2_lhv_year,
+            capacity_var=h2_block.existing_energy_capacity_kwh_h2_lhv,
+            nodes=nodes,
+        )
+
+        attach_standard_cost_expressions(
+            h2_block,
+            allow_adoption=allow_adoption,
+            fixed_om_existing=fixed_om_existing,
+            annualized_capital_if_adopted=annualized_capital_if_adopted,
+            fixed_om_adopted_if_adopted=fixed_om_adopted_if_adopted,
+        )
 
     model.compressed_gas_hydrogen_storage = pyo.Block(rule=block_rule)
     return model.compressed_gas_hydrogen_storage

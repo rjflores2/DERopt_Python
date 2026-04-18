@@ -1,7 +1,11 @@
 """Extract and report optimization results.
 
-After solving, use extract_solution() to get a structured dict, then
-print_solution_summary() for terminal output and/or write_timeseries_csv() for export.
+``extract_solution`` is now a thin **legacy adapter** over
+``utilities.reporting.build_overarching_report``: it flattens the canonical
+overarching report into the flat ``objective_value`` / ``cost_breakdown`` /
+``timeseries`` dict that ``run/playground.py`` and older tests rely on.
+
+For new code, prefer calling ``build_overarching_report`` directly.
 """
 
 from __future__ import annotations
@@ -11,110 +15,123 @@ from typing import Any
 
 import pyomo.environ as pyo
 
+from data_loading.schemas import DataContainer
+from utilities.postsolve_diagnostics import (
+    check_simultaneous_charge_discharge,
+    format_simultaneous_charge_discharge_warnings,
+)
+from utilities.reporting import build_overarching_report
 
-def extract_solution(model: Any, data: Any) -> dict[str, Any]:
-    """Extract solution from a solved model into a plain dict.
+
+def extract_solution(model: pyo.ConcreteModel, data: DataContainer) -> dict[str, Any]:
+    """Extract solution into the legacy flat dict shape.
+
+    This is a view over ``build_overarching_report`` plus a few adapter-only
+    additions (``import_price_per_kwh`` from the utility block's per-node import
+    prices, ``datetime`` from ``data.timeseries``, and ``postsolve_diagnostics``).
 
     Returns:
         objective_value: float (optimization objective; decision-relevant costs only)
-        cost_breakdown: dict including optimizing_cost, fixed_non_optimizing_cost,
-            total_reported_cost, plus utility component slices when available
-        timeseries: dict with per-timestep arrays (length = len(T)):
-            grid_import_kwh, load_kwh, solar_kwh (if solar block present), import_price_per_kwh, datetime (if in data)
+        cost_breakdown:
+            - ``optimizing_cost``, ``fixed_non_optimizing_cost``, ``total_reported_cost``
+            - ``optimizing_components`` / ``non_optimizing_components``: per-block scalar totals
+            - ``by_block_expressions``: all other scalar Expressions on each block
+              (e.g. utility's ``energy_import_cost``, ``nonTOU_Demand_Charge_Cost``, ``TOU_Demand_Charge_Cost``)
+        timeseries: per-timestep arrays of length ``len(T)``:
+            - ``grid_import_kwh``, ``solar_kwh``: legacy top-level aliases
+              (populated from ``electricity_source_kwh_by_block``)
+            - ``electricity_source_kwh_by_block``: dict keyed by block name, summed over nodes
+            - ``load_kwh``, ``import_price_per_kwh``, ``datetime``
+        by_technology_report: raw per-tech ``collect_block_report`` output
+            (e.g. solar/diesel/hydrokinetic capacity factors)
+        postsolve_diagnostics: simultaneous charge/discharge warnings, etc.
     """
     T = list(model.T)
     NODES = list(model.NODES)
     n_time = len(T)
 
-    out: dict[str, Any] = {
-        "objective_value": None,
-        "cost_breakdown": {},
-        "timeseries": {
-            "grid_import_kwh": [0.0] * n_time,
-            "load_kwh": [0.0] * n_time,
-            "solar_kwh": [0.0] * n_time,
-            "import_price_per_kwh": [],
-            "datetime": [],
-        },
-    }
+    report = build_overarching_report(model, data)
+    agg = report["costs"]["aggregate"]
+    by_tech_cost = report["costs"]["by_technology"]
 
-    if model.obj.is_constructed():
-        out["objective_value"] = float(pyo.value(model.obj))
-        out["cost_breakdown"]["optimizing_cost"] = float(pyo.value(model.obj))
-    if hasattr(model, "total_cost_non_optimizing_annual"):
-        out["cost_breakdown"]["fixed_non_optimizing_cost"] = float(pyo.value(model.total_cost_non_optimizing_annual))
-    if (
-        "optimizing_cost" in out["cost_breakdown"]
-        and "fixed_non_optimizing_cost" in out["cost_breakdown"]
-    ):
-        out["cost_breakdown"]["total_reported_cost"] = (
-            out["cost_breakdown"]["optimizing_cost"]
-            + out["cost_breakdown"]["fixed_non_optimizing_cost"]
-        )
+    cost_breakdown: dict[str, Any] = {}
+    if "optimizing_cost" in agg:
+        cost_breakdown["optimizing_cost"] = agg["optimizing_cost"]
+    if "fixed_non_optimizing_cost" in agg:
+        cost_breakdown["fixed_non_optimizing_cost"] = agg["fixed_non_optimizing_cost"]
+    if "total_reported_cost" in agg:
+        cost_breakdown["total_reported_cost"] = agg["total_reported_cost"]
 
-    # Per-block cost slices for downstream decomposition/reporting.
-    non_opt_components: dict[str, float] = {}
+    # Per-block decomposition: pivot the overarching report's by_technology cost rows
+    # into the legacy ``optimizing_components`` / ``non_optimizing_components`` /
+    # ``by_block_expressions`` dicts.
     optimizing_components: dict[str, float] = {}
-    for blk in model.component_objects(pyo.Block, descend_into=False):
-        name = str(blk.name)
-        if hasattr(blk, "cost_non_optimizing_annual"):
-            non_opt_components[name] = float(pyo.value(blk.cost_non_optimizing_annual))
-        if hasattr(blk, "objective_contribution"):
-            optimizing_components[name] = float(pyo.value(blk.objective_contribution))
-    if non_opt_components:
-        out["cost_breakdown"]["non_optimizing_components"] = non_opt_components
+    non_opt_components: dict[str, float] = {}
+    by_block_expressions: dict[str, dict[str, float]] = {}
+    for block_name, row in by_tech_cost.items():
+        if "cost_optimizing_annual" in row:
+            optimizing_components[block_name] = float(row["cost_optimizing_annual"])
+        if "cost_non_optimizing_annual" in row:
+            non_opt_components[block_name] = float(row["cost_non_optimizing_annual"])
+        extra = {
+            k: float(v)
+            for k, v in row.items()
+            if k not in ("cost_optimizing_annual", "cost_non_optimizing_annual")
+        }
+        if extra:
+            by_block_expressions[block_name] = extra
     if optimizing_components:
-        out["cost_breakdown"]["optimizing_components"] = optimizing_components
+        cost_breakdown["optimizing_components"] = optimizing_components
+    if non_opt_components:
+        cost_breakdown["non_optimizing_components"] = non_opt_components
+    if by_block_expressions:
+        cost_breakdown["by_block_expressions"] = by_block_expressions
 
-    # Utility block: cost components and grid_import
-    if hasattr(model, "utility"):
+    # Timeseries: start from the overarching report's per-block source arrays, then
+    # surface legacy ``grid_import_kwh`` / ``solar_kwh`` aliases for the common blocks.
+    by_block_source = dict(report["timeseries"].get("by_block_electricity_source_kwh") or {})
+    timeseries: dict[str, Any] = {
+        "grid_import_kwh": list(by_block_source.get("utility", [0.0] * n_time)),
+        "solar_kwh": list(by_block_source.get("solar_pv", [0.0] * n_time)),
+        "load_kwh": list(report["timeseries"].get("load_kwh") or [0.0] * n_time),
+        "import_price_per_kwh": [],
+        "datetime": [],
+    }
+    if by_block_source:
+        timeseries["electricity_source_kwh_by_block"] = by_block_source
+
+    # Utility import price is not part of the overarching schema (it's an input-facing
+    # signal, not a solution output), so the adapter computes it directly.
+    if hasattr(model, "utility") and hasattr(model.utility, "import_price"):
         ub = model.utility
-        if hasattr(ub, "energy_import_cost"):
-            out["cost_breakdown"]["energy_import_cost"] = float(pyo.value(ub.energy_import_cost))
-        if hasattr(ub, "nonTOU_Demand_Charge_Cost"):
-            out["cost_breakdown"]["nonTOU_demand_charge_cost"] = float(pyo.value(ub.nonTOU_Demand_Charge_Cost))
-        if hasattr(ub, "TOU_Demand_Charge_Cost"):
-            out["cost_breakdown"]["TOU_demand_charge_cost"] = float(pyo.value(ub.TOU_Demand_Charge_Cost))
-        if hasattr(ub, "grid_import"):
-            for t in T:
-                out["timeseries"]["grid_import_kwh"][t] = sum(
-                    float(pyo.value(ub.grid_import[n, t])) for n in NODES
-                )
-        if hasattr(ub, "import_price"):
-            try:
-                out["timeseries"]["import_price_per_kwh"] = [
-                    float(sum(pyo.value(ub.import_price[n, t]) for n in NODES) / max(1, len(NODES)))
-                    for t in T
-                ]
-            except Exception:
-                out["timeseries"]["import_price_per_kwh"] = [float(pyo.value(ub.import_price[t])) for t in T]
+        try:
+            timeseries["import_price_per_kwh"] = [
+                float(sum(pyo.value(ub.import_price[n, t]) for n in NODES) / max(1, len(NODES)))
+                for t in T
+            ]
+        except Exception:
+            timeseries["import_price_per_kwh"] = [float(pyo.value(ub.import_price[t])) for t in T]
 
-    # Load from model param
-    if hasattr(model, "electricity_load"):
-        for t in T:
-            out["timeseries"]["load_kwh"][t] = sum(
-                float(pyo.value(model.electricity_load[n, t])) for n in NODES
-            )
-
-    # Solar from block electricity_source_term (sum over nodes)
-    if hasattr(model, "solar_pv") and hasattr(model.solar_pv, "electricity_source_term"):
-        for t in T:
-            out["timeseries"]["solar_kwh"][t] = sum(
-                float(pyo.value(model.solar_pv.electricity_source_term[n, t])) for n in NODES
-            )
-
-    # Datetime from data (optional)
     datetimes = getattr(data, "timeseries", {}).get("datetime") if data else None
     if datetimes is not None and len(datetimes) == n_time:
-        out["timeseries"]["datetime"] = list(datetimes)
+        timeseries["datetime"] = list(datetimes)
     else:
-        out["timeseries"]["datetime"] = list(range(n_time))
+        timeseries["datetime"] = list(range(n_time))
 
-    # If we never filled import_price from utility block, use data.import_prices
-    if not out["timeseries"]["import_price_per_kwh"] and getattr(data, "import_prices", None):
-        out["timeseries"]["import_price_per_kwh"] = list(data.import_prices)
+    if not timeseries["import_price_per_kwh"] and getattr(data, "import_prices", None):
+        timeseries["import_price_per_kwh"] = list(data.import_prices)
 
-    return out
+    return {
+        "objective_value": agg.get("objective_optimizing_annual"),
+        "cost_breakdown": cost_breakdown,
+        "timeseries": timeseries,
+        "by_technology_report": report.get("by_technology_report") or {},
+        # Post-solve diagnostics: flag (but do not fix) storage devices that operate
+        # charge + discharge simultaneously. Informational only.
+        "postsolve_diagnostics": {
+            "simultaneous_charge_discharge": check_simultaneous_charge_discharge(model),
+        },
+    }
 
 
 def print_solution_summary(extracted: dict[str, Any]) -> None:
@@ -126,7 +143,24 @@ def print_solution_summary(extracted: dict[str, Any]) -> None:
     if cb:
         print("  Cost breakdown:")
         for k, v in cb.items():
-            if v is not None and v != 0:
+            if v is None:
+                continue
+            if isinstance(v, dict):
+                nz = {ik: iv for ik, iv in v.items() if not isinstance(iv, dict) and iv}
+                if not nz and not any(isinstance(iv, dict) for iv in v.values()):
+                    continue
+                print(f"    {k}:")
+                for ik, iv in v.items():
+                    if isinstance(iv, dict):
+                        inner = {nk: nv for nk, nv in iv.items() if nv}
+                        if not inner:
+                            continue
+                        print(f"      {ik}:")
+                        for nk, nv in inner.items():
+                            print(f"        {nk}: {nv:,.2f}")
+                    elif iv:
+                        print(f"      {ik}: {iv:,.2f}")
+            elif v:
                 print(f"    {k}: {v:,.2f}")
     ts = extracted.get("timeseries") or {}
     grid = ts.get("grid_import_kwh") or []
@@ -143,6 +177,14 @@ def print_solution_summary(extracted: dict[str, Any]) -> None:
             print(f"    Solar:      {total_solar:,.0f}")
         if grid and max(grid) > 0:
             print(f"    Peak grid import (kW): {max(grid):,.2f}")
+
+    diagnostics = extracted.get("postsolve_diagnostics") or {}
+    sim_report = diagnostics.get("simultaneous_charge_discharge") or {}
+    sim_lines = format_simultaneous_charge_discharge_warnings(sim_report)
+    if sim_lines:
+        print("  Post-solve diagnostics:")
+        for line in sim_lines:
+            print(line)
 
 
 def write_timeseries_csv(extracted: dict[str, Any], path: Path | str) -> None:

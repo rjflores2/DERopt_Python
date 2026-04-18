@@ -17,6 +17,13 @@ from typing import Any
 
 import pyomo.environ as pyo
 
+from data_loading.schemas import DataContainer
+from shared.cost_helpers import (
+    annualized_fixed_cost_by_node,
+    attach_standard_cost_expressions,
+    time_summed_variable_cost,
+)
+
 from .inputs import (
     FORMULATION_PEM_ELECTROLYZER_BINARY,
     FORMULATION_PEM_ELECTROLYZER_LP,
@@ -25,8 +32,8 @@ from .inputs import (
 
 
 def add_pem_electrolyzer_block(
-    model: Any,
-    data: Any,
+    model: pyo.Block,
+    data: DataContainer,
     *,
     pem_electrolyzer_params: dict[str, Any] | None = None,
     financials: dict[str, Any] | None = None,
@@ -37,7 +44,7 @@ def add_pem_electrolyzer_block(
     1. Data and other inputs
        - ``data.static["electricity_load_keys"]`` / ``model.NODES``
        - ``model.T`` from ``model.core``
-       - ``data.static["time_step_hours"]`` (defaults to 1.0 if missing) — converts nameplate kW to max kWh per timestep
+       - ``model.time_step_hours`` from ``model.core`` — converts nameplate kW to max kWh per timestep
        - ``data.timeseries[node]`` — peak load per node for binary big-M (same length as ``model.T``)
        - ``pem_electrolyzer_params`` / ``financials``
 
@@ -51,7 +58,9 @@ def add_pem_electrolyzer_block(
        - ``pem_electrolyzer_unit_milp`` (with adoption): ``units_adopted[node]`` (integer); ``units_on[node, t]`` (integer)
 
     4. Pyomo parameters
-       - Efficiency, costs, limits, ``time_step_hours``, ``electrolyzer_binary_big_m_load_multiplier`` (binary only)
+       - Efficiency, costs, limits, ``electrolyzer_binary_big_m_load_multiplier`` (binary only)
+       - ``model.time_step_hours`` (owned by ``model.core``) -> converts nameplate kW to max
+         kWh per timestep inside this block's constraints
        - ``maximum_load_kwh_per_timestep[node]`` (binary only) — max ``data.timeseries`` over the horizon
        - ``big_m_electricity_kwh_per_timestep[node]`` (binary only) = peak load × multiplier
 
@@ -74,7 +83,7 @@ def add_pem_electrolyzer_block(
     """
     T = model.T
     nodes = list(model.NODES)
-    dt_hours = float((getattr(data, "static", {}) or {}).get("time_step_hours") or 1.0)
+    dt_hours = float(pyo.value(model.time_step_hours))
 
     resolved = resolve_pem_electrolyzer_block_inputs(
         pem_electrolyzer_params,
@@ -96,9 +105,6 @@ def add_pem_electrolyzer_block(
         big_m_elec_by_node = {node: max_load_kwh_by_node[node] * mult for node in nodes}
 
     def block_rule(ele_block):
-        ele_block.time_step_hours = pyo.Param(
-            initialize=resolved.time_step_hours, within=pyo.PositiveReals, mutable=True
-        )
         ele_block.capital_cost_per_kw = pyo.Param(
             initialize=resolved.capital_cost_per_kw, within=pyo.NonNegativeReals, mutable=True
         )
@@ -117,45 +123,45 @@ def add_pem_electrolyzer_block(
         ele_block.electric_to_hydrogen_lhv_efficiency = pyo.Param(
             initialize=resolved.electric_to_hydrogen_lhv_efficiency,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         ele_block.minimum_loading_fraction = pyo.Param(
-            initialize=resolved.minimum_loading_fraction, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.minimum_loading_fraction, within=pyo.NonNegativeReals, mutable=False
         )
         ele_block.unit_capacity_kw = pyo.Param(
-            initialize=resolved.unit_capacity_kw, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.unit_capacity_kw, within=pyo.NonNegativeReals, mutable=False
         )
         ele_block.existing_capacity_kw = pyo.Param(
             nodes,
             initialize=resolved.existing_capacity_kw_by_node,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         ele_block.existing_unit_count = pyo.Param(
             nodes,
             initialize=resolved.existing_unit_count_by_node,
             within=pyo.NonNegativeIntegers,
-            mutable=True,
+            mutable=False,
         )
         ele_block.capacity_adoption_limit_kw = pyo.Param(
             nodes,
             initialize=resolved.capacity_adoption_limit_kw_by_node,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         ele_block.unit_adoption_limit = pyo.Param(
             nodes,
             initialize=resolved.unit_adoption_limit_by_node,
             within=pyo.NonNegativeIntegers,
-            mutable=True,
+            mutable=False,
         )
         ele_block.amortization_factor = pyo.Param(
-            initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=False
         )
         ele_block.electrolyzer_binary_big_m_load_multiplier = pyo.Param(
             initialize=resolved.electrolyzer_binary_big_m_load_multiplier,
             within=pyo.PositiveReals,
-            mutable=True,
+            mutable=False,
         )
 
         ele_block.electricity_consumption_kwh_electric = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
@@ -179,7 +185,7 @@ def add_pem_electrolyzer_block(
             ele_block.installed_electric_capacity_kw = pyo.Expression(nodes, rule=installed_kw_rule)
 
             def max_energy_per_timestep_rule(m, node):
-                return m.installed_electric_capacity_kw[node] * m.time_step_hours
+                return m.installed_electric_capacity_kw[node] * model.time_step_hours
 
             ele_block.max_electricity_kwh_electric_per_timestep = pyo.Expression(
                 nodes, rule=max_energy_per_timestep_rule
@@ -194,10 +200,10 @@ def add_pem_electrolyzer_block(
 
             if formulation == FORMULATION_PEM_ELECTROLYZER_BINARY:
                 ele_block.maximum_load_kwh_per_timestep = pyo.Param(
-                    nodes, initialize=max_load_kwh_by_node, within=pyo.NonNegativeReals, mutable=True
+                    nodes, initialize=max_load_kwh_by_node, within=pyo.NonNegativeReals, mutable=False
                 )
                 ele_block.big_m_electricity_kwh_per_timestep = pyo.Param(
-                    nodes, initialize=big_m_elec_by_node, within=pyo.NonNegativeReals, mutable=True
+                    nodes, initialize=big_m_elec_by_node, within=pyo.NonNegativeReals, mutable=False
                 )
                 ele_block.electrolyzer_on = pyo.Var(nodes, T, within=pyo.Binary)
 
@@ -215,24 +221,25 @@ def add_pem_electrolyzer_block(
                 ele_block.consumption_commitment_big_m = pyo.Constraint(nodes, T, rule=consumption_big_m_rule)
                 ele_block.consumption_min_loading = pyo.Constraint(nodes, T, rule=consumption_min_load_rule)
 
+            annualized_capital_if_adopted = None
+            fixed_om_adopted_if_adopted = None
             if allow_adoption:
-                ele_block.pem_capital_costs = pyo.Expression(
-                    expr=sum(
-                        ele_block.capital_cost_per_kw
-                        * ele_block.capacity_adopted_kw[node]
-                        * ele_block.amortization_factor
-                        for node in nodes
-                    )
+                annualized_capital_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=ele_block.capital_cost_per_kw,
+                    capacity_var=ele_block.capacity_adopted_kw,
+                    nodes=nodes,
+                    amortization_factor=ele_block.amortization_factor,
                 )
-                ele_block.pem_fixed_operations_and_maintenance = pyo.Expression(
-                    expr=sum(ele_block.fixed_om_per_kw_year * ele_block.capacity_adopted_kw[node] for node in nodes)
+                fixed_om_adopted_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=ele_block.fixed_om_per_kw_year,
+                    capacity_var=ele_block.capacity_adopted_kw,
+                    nodes=nodes,
                 )
-            else:
-                ele_block.pem_capital_costs = pyo.Expression(expr=0.0)
-                ele_block.pem_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
 
-            ele_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(ele_block.fixed_om_per_kw_year * ele_block.existing_capacity_kw[node] for node in nodes)
+            fixed_om_existing = annualized_fixed_cost_by_node(
+                cost_per_unit=ele_block.fixed_om_per_kw_year,
+                capacity_var=ele_block.existing_capacity_kw,
+                nodes=nodes,
             )
 
         else:  # unit_milp
@@ -262,11 +269,11 @@ def add_pem_electrolyzer_block(
                 return m.units_on[node, t] <= m.installed_unit_count[node]
 
             def consumption_upper_units_rule(m, node, t):
-                cap_e = m.unit_capacity_kw * m.time_step_hours
+                cap_e = m.unit_capacity_kw * model.time_step_hours
                 return m.electricity_consumption_kwh_electric[node, t] <= cap_e * m.units_on[node, t]
 
             def consumption_lower_units_rule(m, node, t):
-                cap_e = m.unit_capacity_kw * m.time_step_hours
+                cap_e = m.unit_capacity_kw * model.time_step_hours
                 return m.electricity_consumption_kwh_electric[node, t] >= (
                     m.minimum_loading_fraction * cap_e * m.units_on[node, t]
                 )
@@ -275,24 +282,25 @@ def add_pem_electrolyzer_block(
             ele_block.consumption_upper_by_units = pyo.Constraint(nodes, T, rule=consumption_upper_units_rule)
             ele_block.consumption_lower_by_units = pyo.Constraint(nodes, T, rule=consumption_lower_units_rule)
 
+            annualized_capital_if_adopted = None
+            fixed_om_adopted_if_adopted = None
             if allow_adoption:
-                ele_block.pem_capital_costs = pyo.Expression(
-                    expr=sum(
-                        ele_block.capital_cost_per_unit
-                        * ele_block.units_adopted[node]
-                        * ele_block.amortization_factor
-                        for node in nodes
-                    )
+                annualized_capital_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=ele_block.capital_cost_per_unit,
+                    capacity_var=ele_block.units_adopted,
+                    nodes=nodes,
+                    amortization_factor=ele_block.amortization_factor,
                 )
-                ele_block.pem_fixed_operations_and_maintenance = pyo.Expression(
-                    expr=sum(ele_block.fixed_om_per_unit_year * ele_block.units_adopted[node] for node in nodes)
+                fixed_om_adopted_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=ele_block.fixed_om_per_unit_year,
+                    capacity_var=ele_block.units_adopted,
+                    nodes=nodes,
                 )
-            else:
-                ele_block.pem_capital_costs = pyo.Expression(expr=0.0)
-                ele_block.pem_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
 
-            ele_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(ele_block.fixed_om_per_unit_year * ele_block.existing_unit_count[node] for node in nodes)
+            fixed_om_existing = annualized_fixed_cost_by_node(
+                cost_per_unit=ele_block.fixed_om_per_unit_year,
+                capacity_var=ele_block.existing_unit_count,
+                nodes=nodes,
             )
 
         ele_block.hydrogen_production_kwh_h2_lhv = pyo.Expression(
@@ -302,20 +310,22 @@ def add_pem_electrolyzer_block(
             * m.electricity_consumption_kwh_electric[node, t],
         )
 
-        ele_block.pem_variable_operating_costs = pyo.Expression(
-            expr=sum(
-                ele_block.variable_om_per_kwh_electric * ele_block.electricity_consumption_kwh_electric[node, t]
-                for node in nodes
-                for t in T
-            )
+        variable_operating_cost = time_summed_variable_cost(
+            cost_per_unit=ele_block.variable_om_per_kwh_electric,
+            flow_var=ele_block.electricity_consumption_kwh_electric,
+            nodes=nodes,
+            time_set=T,
         )
-        ele_block.objective_contribution = pyo.Expression(
-            expr=(
-                ele_block.pem_capital_costs
-                + ele_block.pem_fixed_operations_and_maintenance
-                + ele_block.pem_variable_operating_costs
-            )
+
+        attach_standard_cost_expressions(
+            ele_block,
+            allow_adoption=allow_adoption,
+            fixed_om_existing=fixed_om_existing,
+            annualized_capital_if_adopted=annualized_capital_if_adopted,
+            fixed_om_adopted_if_adopted=fixed_om_adopted_if_adopted,
+            variable_operating_cost=variable_operating_cost,
         )
+
         ele_block.electricity_sink_term = pyo.Expression(
             nodes, T, rule=lambda m, node, t: m.electricity_consumption_kwh_electric[node, t]
         )

@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pyomo.environ as pyo
 
+from config.case_config import CaseConfig
+from data_loading.schemas import DataContainer
 from technologies.equipment_cost_diagnostics import equipment_capital_om_warnings
 
 
 def collect_equipment_cost_diagnostics(
-    model: Any,
-    _data: Any,
-    _case_cfg: Any,
+    model: pyo.Block,
+    _data: DataContainer,
+    _case_cfg: CaseConfig | None,
 ) -> list[str]:
     """Warn on negative or all-zero battery capital / O&M (values from built model)."""
     if not hasattr(model, "battery_energy_storage"):

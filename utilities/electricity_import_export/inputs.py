@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import pyomo.environ as pyo
+
 from data_loading.loaders.utility_rates.customer_charge_horizon import (
     fixed_customer_charges_horizon_usd,
 )
+from data_loading.schemas import DataContainer
 
 
 @dataclass(frozen=True)
@@ -44,7 +47,7 @@ def demand_charge_type_for_node(
 # --- resolve_utility_inputs: energy prices, tariff objects, demand prerequisites, fixed fees ---
 
 
-def resolve_utility_inputs(model: Any, data: Any) -> ResolvedUtilityInputs | None:
+def resolve_utility_inputs(model: pyo.Block, data: DataContainer) -> ResolvedUtilityInputs | None:
     """Merge node-scoped prices/rates, validate demand-charge prerequisites, fixed charges.
 
     Returns ``None`` if the utility block should not be built (no energy, demand, or fixed fees).

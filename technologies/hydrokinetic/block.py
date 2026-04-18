@@ -6,6 +6,12 @@ from typing import Any
 
 import pyomo.environ as pyo
 
+from data_loading.schemas import DataContainer
+from shared.cost_helpers import (
+    annualized_fixed_cost_by_node_category,
+    attach_standard_cost_expressions,
+)
+
 from .inputs import (
     FORMULATION_HYDROKINETIC_LP,
     FORMULATION_HYDROKINETIC_UNIT_MILP,
@@ -14,8 +20,8 @@ from .inputs import (
 
 
 def add_hydrokinetic_block(
-    model: Any,
-    data: Any,
+    model: pyo.Block,
+    data: DataContainer,
     *,
     hydrokinetic_params: dict[str, Any] | None = None,
     financials: dict[str, Any] | None = None,
@@ -59,7 +65,7 @@ def add_hydrokinetic_block(
                 f"hydrokinetic: timeseries[{key!r}] length {len(production_by_profile[key])} != {n_time}"
             )
 
-    dt_hours = float(data.static.get("time_step_hours") or 1.0)
+    dt_hours = float(pyo.value(model.time_step_hours))
     resolved = resolve_hydrokinetic_block_inputs(
         hydrokinetic_params,
         financials,
@@ -87,10 +93,8 @@ def add_hydrokinetic_block(
                 for t in T_list
             },
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
-        hk_block.time_step_hours = pyo.Param(initialize=dt_hours, within=pyo.PositiveReals, mutable=True)
-
         hk_block.hkt_generation = pyo.Var(nodes, hk_block.HKT, T, within=pyo.NonNegativeReals)
 
         # --- Per-profile scalar params (Pyomo indexed by set) ---
@@ -128,19 +132,19 @@ def add_hydrokinetic_block(
             hk_block.HKT,
             initialize={p: resolved.max_power_density_kw_per_m2[i] for i, p in enumerate(profiles)},
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         hk_block.unit_swept_area_m2 = pyo.Param(
             hk_block.HKT,
             initialize={p: resolved.unit_swept_area_m2[i] for i, p in enumerate(profiles)},
             within=pyo.PositiveReals,
-            mutable=True,
+            mutable=False,
         )
         hk_block.unit_capacity_kw = pyo.Param(
             hk_block.HKT,
             initialize={p: resolved.unit_capacity_kw[i] for i, p in enumerate(profiles)},
             within=pyo.PositiveReals,
-            mutable=True,
+            mutable=False,
         )
         hk_block.annual_capital_per_unit = pyo.Param(
             hk_block.HKT,
@@ -160,21 +164,21 @@ def add_hydrokinetic_block(
             hk_block.HKT,
             initialize={(n, p): resolved.existing_swept_area_m2[(n, p)] for n in nodes for p in profiles},
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         hk_block.existing_capacity_kw = pyo.Param(
             nodes,
             hk_block.HKT,
             initialize={(n, p): resolved.existing_capacity_kw[(n, p)] for n in nodes for p in profiles},
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         hk_block.max_swept_area_m2 = pyo.Param(
             nodes,
             hk_block.HKT,
             initialize={(n, p): resolved.max_swept_area_m2[(n, p)] for n in nodes for p in profiles},
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         hk_block.max_installed_units = pyo.Param(
             nodes,
@@ -183,17 +187,17 @@ def add_hydrokinetic_block(
                 (n, p): resolved.max_installed_units_by_node_profile[(n, p)] for n in nodes for p in profiles
             },
             within=pyo.NonNegativeIntegers,
-            mutable=True,
+            mutable=False,
         )
         hk_block.existing_units = pyo.Param(
             nodes,
             hk_block.HKT,
             initialize={(n, p): resolved.existing_units_by_node_profile[(n, p)] for n in nodes for p in profiles},
             within=pyo.NonNegativeIntegers,
-            mutable=True,
+            mutable=False,
         )
         hk_block.amortization_factor = pyo.Param(
-            initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=False
         )
 
         if formulation == FORMULATION_HYDROKINETIC_LP:
@@ -219,7 +223,7 @@ def add_hydrokinetic_block(
                 return m.hkt_generation[node, p, t] <= m.total_swept_area_m2[node, p] * m.yield_kwh_per_m2[p, t]
 
             def gen_nameplate_limit(m, node, p, t):
-                return m.hkt_generation[node, p, t] <= m.total_capacity_kw[node, p] * m.time_step_hours
+                return m.hkt_generation[node, p, t] <= m.total_capacity_kw[node, p] * model.time_step_hours
 
             hk_block.generation_resource_limit = pyo.Constraint(
                 nodes, hk_block.HKT, T, rule=gen_resource_limit
@@ -239,39 +243,45 @@ def add_hydrokinetic_block(
             hk_block.power_density_cap = pyo.Constraint(nodes, hk_block.HKT, rule=power_density_cap_lp)
             hk_block.area_cap = pyo.Constraint(nodes, hk_block.HKT, rule=area_cap_lp)
 
+            annualized_capital_if_adopted = None
+            fixed_om_adopted_if_adopted = None
             if allow_adoption:
-                hk_block.hkt_capital_kw = pyo.Expression(
-                    expr=sum(
-                        hk_block.capital_cost_per_kw[p]
-                        * hk_block.capacity_kw_adopted[node, p]
-                        * hk_block.amortization_factor
-                        for p in hk_block.HKT
-                        for node in nodes
-                    )
+                hk_block.hkt_capital_kw = annualized_fixed_cost_by_node_category(
+                    cost_per_unit_by_category=hk_block.capital_cost_per_kw,
+                    capacity_var_by_node_category=hk_block.capacity_kw_adopted,
+                    nodes=nodes,
+                    categories=hk_block.HKT,
+                    amortization_factor=hk_block.amortization_factor,
                 )
-                hk_block.hkt_capital_m2 = pyo.Expression(
-                    expr=sum(
-                        hk_block.capital_cost_per_m2[p]
-                        * hk_block.swept_area_adopted[node, p]
-                        * hk_block.amortization_factor
-                        for p in hk_block.HKT
-                        for node in nodes
-                    )
+                hk_block.hkt_capital_m2 = annualized_fixed_cost_by_node_category(
+                    cost_per_unit_by_category=hk_block.capital_cost_per_m2,
+                    capacity_var_by_node_category=hk_block.swept_area_adopted,
+                    nodes=nodes,
+                    categories=hk_block.HKT,
+                    amortization_factor=hk_block.amortization_factor,
                 )
-                hk_block.hkt_fixed_om = pyo.Expression(
-                    expr=sum(
-                        hk_block.fixed_om_per_kw_year[p] * hk_block.capacity_kw_adopted[node, p]
-                        + hk_block.fixed_om_per_m2_year[p] * hk_block.swept_area_adopted[node, p]
-                        for p in hk_block.HKT
-                        for node in nodes
-                    )
+                hk_block.hkt_fixed_om_kw = annualized_fixed_cost_by_node_category(
+                    cost_per_unit_by_category=hk_block.fixed_om_per_kw_year,
+                    capacity_var_by_node_category=hk_block.capacity_kw_adopted,
+                    nodes=nodes,
+                    categories=hk_block.HKT,
                 )
-            else:
-                hk_block.hkt_capital_kw = pyo.Expression(expr=0.0)
-                hk_block.hkt_capital_m2 = pyo.Expression(expr=0.0)
-                hk_block.hkt_fixed_om = pyo.Expression(expr=0.0)
+                hk_block.hkt_fixed_om_m2 = annualized_fixed_cost_by_node_category(
+                    cost_per_unit_by_category=hk_block.fixed_om_per_m2_year,
+                    capacity_var_by_node_category=hk_block.swept_area_adopted,
+                    nodes=nodes,
+                    categories=hk_block.HKT,
+                )
+                annualized_capital_if_adopted = pyo.Expression(
+                    expr=hk_block.hkt_capital_kw + hk_block.hkt_capital_m2
+                )
+                fixed_om_adopted_if_adopted = pyo.Expression(
+                    expr=hk_block.hkt_fixed_om_kw + hk_block.hkt_fixed_om_m2
+                )
 
-            hk_block.hkt_variable_om = pyo.Expression(
+            # Variable O&M is keyed by [node, profile, t] (per-profile rate); kept inline
+            # because helper supports [node, t] flow only.
+            variable_operating_cost = pyo.Expression(
                 expr=sum(
                     hk_block.variable_om_per_kwh[p] * hk_block.hkt_generation[node, p, t]
                     for p in hk_block.HKT
@@ -279,21 +289,23 @@ def add_hydrokinetic_block(
                     for t in T
                 )
             )
-            hk_block.objective_contribution = pyo.Expression(
-                expr=(
-                    hk_block.hkt_capital_kw
-                    + hk_block.hkt_capital_m2
-                    + hk_block.hkt_fixed_om
-                    + hk_block.hkt_variable_om
-                )
-            )
-            hk_block.cost_non_optimizing_annual = pyo.Expression(
+
+            fixed_om_existing = pyo.Expression(
                 expr=sum(
                     hk_block.fixed_om_per_kw_year[p] * hk_block.existing_capacity_kw[node, p]
                     + hk_block.fixed_om_per_m2_year[p] * hk_block.existing_swept_area_m2[node, p]
                     for p in hk_block.HKT
                     for node in nodes
                 )
+            )
+
+            attach_standard_cost_expressions(
+                hk_block,
+                allow_adoption=allow_adoption,
+                fixed_om_existing=fixed_om_existing,
+                annualized_capital_if_adopted=annualized_capital_if_adopted,
+                fixed_om_adopted_if_adopted=fixed_om_adopted_if_adopted,
+                variable_operating_cost=variable_operating_cost,
             )
 
         elif formulation == FORMULATION_HYDROKINETIC_UNIT_MILP:
@@ -321,7 +333,7 @@ def add_hydrokinetic_block(
                 return m.hkt_generation[node, p, t] <= m.total_swept_area_m2[node, p] * m.yield_kwh_per_m2[p, t]
 
             def gen_nameplate_limit_milp(m, node, p, t):
-                return m.hkt_generation[node, p, t] <= m.total_capacity_kw[node, p] * m.time_step_hours
+                return m.hkt_generation[node, p, t] <= m.total_capacity_kw[node, p] * model.time_step_hours
 
             hk_block.generation_resource_limit = pyo.Constraint(
                 nodes, hk_block.HKT, T, rule=gen_resource_limit_milp
@@ -335,26 +347,25 @@ def add_hydrokinetic_block(
 
             hk_block.units_cap = pyo.Constraint(nodes, hk_block.HKT, rule=units_cap_milp)
 
+            annualized_capital_if_adopted = None
+            fixed_om_adopted_if_adopted = None
             if allow_adoption:
-                hk_block.hkt_capital_units = pyo.Expression(
-                    expr=sum(
-                        hk_block.annual_capital_per_unit[p] * hk_block.units_adopted[node, p]
-                        for p in hk_block.HKT
-                        for node in nodes
-                    )
+                # ``annual_capital_per_unit`` is already annualized in inputs, so no
+                # amortization_factor multiplier here (default 1.0 in the helper).
+                annualized_capital_if_adopted = annualized_fixed_cost_by_node_category(
+                    cost_per_unit_by_category=hk_block.annual_capital_per_unit,
+                    capacity_var_by_node_category=hk_block.units_adopted,
+                    nodes=nodes,
+                    categories=hk_block.HKT,
                 )
-                hk_block.hkt_fixed_om = pyo.Expression(
-                    expr=sum(
-                        hk_block.fixed_om_per_unit_year_param[p] * hk_block.units_adopted[node, p]
-                        for p in hk_block.HKT
-                        for node in nodes
-                    )
+                fixed_om_adopted_if_adopted = annualized_fixed_cost_by_node_category(
+                    cost_per_unit_by_category=hk_block.fixed_om_per_unit_year_param,
+                    capacity_var_by_node_category=hk_block.units_adopted,
+                    nodes=nodes,
+                    categories=hk_block.HKT,
                 )
-            else:
-                hk_block.hkt_capital_units = pyo.Expression(expr=0.0)
-                hk_block.hkt_fixed_om = pyo.Expression(expr=0.0)
 
-            hk_block.hkt_variable_om = pyo.Expression(
+            variable_operating_cost = pyo.Expression(
                 expr=sum(
                     hk_block.variable_om_per_kwh[p] * hk_block.hkt_generation[node, p, t]
                     for p in hk_block.HKT
@@ -362,15 +373,21 @@ def add_hydrokinetic_block(
                     for t in T
                 )
             )
-            hk_block.objective_contribution = pyo.Expression(
-                expr=hk_block.hkt_capital_units + hk_block.hkt_fixed_om + hk_block.hkt_variable_om
+
+            fixed_om_existing = annualized_fixed_cost_by_node_category(
+                cost_per_unit_by_category=hk_block.fixed_om_per_unit_year_param,
+                capacity_var_by_node_category=hk_block.existing_units,
+                nodes=nodes,
+                categories=hk_block.HKT,
             )
-            hk_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(
-                    hk_block.fixed_om_per_unit_year_param[p] * hk_block.existing_units[node, p]
-                    for p in hk_block.HKT
-                    for node in nodes
-                )
+
+            attach_standard_cost_expressions(
+                hk_block,
+                allow_adoption=allow_adoption,
+                fixed_om_existing=fixed_om_existing,
+                annualized_capital_if_adopted=annualized_capital_if_adopted,
+                fixed_om_adopted_if_adopted=fixed_om_adopted_if_adopted,
+                variable_operating_cost=variable_operating_cost,
             )
 
         hk_block.electricity_source_term = pyo.Expression(

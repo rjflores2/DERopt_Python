@@ -41,6 +41,22 @@ def build_model(
     # Time set: one index per period (e.g. 0..8759 for hourly over a year).
     model.T = pyo.Set(initialize=range(len(data.indices["time"])), ordered=True)
 
+    # Sub-hourly timestep support: single source of truth, shared by all tech blocks.
+    # All flow variables contributing to the electricity/hydrogen balances are in
+    # kWh-per-timestep; capacity (kW) constraints multiply by ``time_step_hours``.
+    # ``data.static["time_step_hours"]`` is populated by the load loader; defaults to 1.0.
+    dt_hours = data.static.get("time_step_hours")
+    if dt_hours is None:
+        dt_hours = 1.0
+    dt_hours = float(dt_hours)
+    if dt_hours <= 0:
+        raise ValueError(
+            f"time_step_hours must be positive; got {dt_hours}"
+        )
+    model.time_step_hours = pyo.Param(
+        initialize=dt_hours, within=pyo.PositiveReals, mutable=False
+    )
+
     # Node set: one entry per load series (from load data); used for per-node balance and tech blocks.
     load_keys = data.static.get("electricity_load_keys") or []
     if not load_keys:
@@ -117,6 +133,10 @@ def build_model(
                 block=blk,
                 model=model,
             )
+            # Record the full dotted package path that owns this block's reporting hooks.
+            # Reporting discovery (``collect_block_report`` / ``collect_block_timeseries`` /
+            # ``collect_block_emissions``) routes to ``<_technology_module>.reporting``.
+            blk._technology_module = f"technologies.{technology_name}"
         elif blk is not None:
             raise ValueError(
                 f"technology {technology_name!r}: register() returned None but "
@@ -136,6 +156,9 @@ def build_model(
     # Attach when we have import_prices or demand-charge data so balance can include grid and objective includes utility cost.
     from utilities.electricity_import_export import register as register_utility_block
     register_utility_block(model, data)
+    if getattr(model, "utility", None) is not None:
+        # The utility block is not a registry technology, but reporting hooks discover it the same way.
+        model.utility._technology_module = "utilities.electricity_import_export"
 
     # -------------------------------------------------------------------------
     # Electricity balance: sources == sinks (per node, per time)
@@ -155,7 +178,7 @@ def build_model(
         model.T,
         initialize=load_init,
         within=pyo.NonNegativeReals,
-        mutable=True,
+        mutable=False,
     )
 
     # Sources: sum of electricity_source_term over all top-level blocks that define it (e.g. solar_pv).

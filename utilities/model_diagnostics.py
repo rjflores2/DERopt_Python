@@ -12,23 +12,26 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-# Full calendar year in hours (typical hourly 8760 run).
+import pyomo.environ as pyo
+
+from config.case_config import CaseConfig
+from data_loading.schemas import DataContainer
+
 _FULL_YEAR_HOURS = 8760.0
 _FLOAT_TOL = 1e-9
 
-# Optional hooks for additional checks (same contract as internal check helpers).
-_extra_checks: list[Callable[[Any, Any, Any], list[str]]] = []
+DiagnosticCheck = Callable[[pyo.Block, DataContainer, CaseConfig | None], list[str]]
+
+_extra_checks: list[DiagnosticCheck] = []
 
 
-def register_diagnostic_check(
-    fn: Callable[[Any, Any, Any], list[str]],
-) -> Callable[[Any, Any, Any], list[str]]:
+def register_diagnostic_check(fn: DiagnosticCheck) -> DiagnosticCheck:
     """Register an extra diagnostic function ``(model, data, case_cfg) -> list[str]``."""
     _extra_checks.append(fn)
     return fn
 
 
-def _hours_represented(data: Any) -> float | None:
+def _hours_represented(data: DataContainer) -> float | None:
     static = getattr(data, "static", None) or {}
     n = len(getattr(data, "indices", {}).get("time", []) or [])
     if n <= 0:
@@ -66,24 +69,24 @@ def _demand_charge_has_nonzero_rates(demand_charges: dict[str, Any] | None) -> b
     return False
 
 
-def _has_nonzero_marginal_energy_prices(data: Any) -> bool:
+def _has_nonzero_marginal_energy_prices(data: DataContainer) -> bool:
     by_node = getattr(data, "import_prices_by_node", None)
     if not isinstance(by_node, dict):
         return False
     return any(abs(float(v)) > _FLOAT_TOL for vals in by_node.values() for v in (vals or []))
 
 
-def _utility_block_present(model: Any) -> bool:
+def _utility_block_present(model: pyo.Block) -> bool:
     return getattr(model, "utility", None) is not None
 
 
-def _nodes(model: Any, data: Any) -> list[str]:
+def _nodes(model: pyo.Block, data: DataContainer) -> list[str]:
     if getattr(model, "NODES", None) is not None:
         return list(model.NODES)
     return list((getattr(data, "static", {}) or {}).get("electricity_load_keys") or [])
 
 
-def _import_prices_by_node(model: Any, data: Any) -> dict[str, list[float]]:
+def _import_prices_by_node(model: pyo.Block, data: DataContainer) -> dict[str, list[float]]:
     nodes = _nodes(model, data)
     out: dict[str, list[float]] = {}
     by_node = getattr(data, "import_prices_by_node", None)
@@ -95,7 +98,7 @@ def _import_prices_by_node(model: Any, data: Any) -> dict[str, list[float]]:
     return out
 
 
-def _utility_rates_by_node(model: Any, data: Any) -> dict[str, Any | None]:
+def _utility_rates_by_node(model: pyo.Block, data: DataContainer) -> dict[str, Any | None]:
     nodes = _nodes(model, data)
     out: dict[str, Any | None] = {}
     by_node = getattr(data, "utility_rate_by_node", None)
@@ -106,7 +109,7 @@ def _utility_rates_by_node(model: Any, data: Any) -> dict[str, Any | None]:
     return out
 
 
-def _check_horizon(data: Any) -> list[str]:
+def _check_horizon(data: DataContainer) -> list[str]:
     out: list[str] = []
     static = getattr(data, "static", None) or {}
     if static.get("time_subset_applied") is not None:
@@ -133,15 +136,16 @@ def _rate_from_urdb_structure(struct: Any) -> float:
     return 0.0
 
 
-def _extract_applicable_utility_demand_charge_rates_by_node(model: Any, data: Any) -> dict[str, list[float]]:
+def _extract_applicable_utility_demand_charge_rates_by_node(
+    model: pyo.Block, data: DataContainer
+) -> dict[str, list[float]]:
     """
     Extract demand-charge $/kW rates that correspond to demand-charge *decision variables*
     created in ``model.utility``.
 
     This avoids needing to re-implement month/tier applicability logic in diagnostics: if the
-    model created ``P_flat_y{year}_m{month}`` / ``P_tou_y{year}_m{month}_tier{tier}`` (or legacy
-    ``P_flat_m{month}`` / ``P_tou_m{month}_tier{tier}``), those are the applicable rates for this
-    run/horizon.
+    model created indexed ``P_flat[year, month, node]`` / ``P_tou[year, month, tier, node]``
+    decision variables, those are the applicable rates for this run/horizon.
     """
     nodes = _nodes(model, data)
     out: dict[str, list[float]] = {n: [] for n in nodes}
@@ -179,7 +183,7 @@ def _extract_applicable_utility_demand_charge_rates_by_node(model: Any, data: An
     return out
 
 
-def _check_utility_free_grid_zero_or_missing_costs(model: Any, data: Any) -> list[str]:
+def _check_utility_free_grid_zero_or_missing_costs(model: pyo.Block, data: DataContainer) -> list[str]:
     """
     Warn if decision variables exist but the decision-dependent *marginal* utility cost signal
     is effectively zero (energy import prices and demand-charge rates are all ~0).
@@ -208,7 +212,7 @@ def _check_utility_free_grid_zero_or_missing_costs(model: Any, data: Any) -> lis
     return []
 
 
-def _check_negative_utility_energy_prices(data: Any) -> list[str]:
+def _check_negative_utility_energy_prices(data: DataContainer) -> list[str]:
     # model is not available here, so infer nodes directly from data.
     nodes = list((getattr(data, "static", {}) or {}).get("electricity_load_keys") or [])
     by_node = getattr(data, "import_prices_by_node", None)
@@ -230,7 +234,7 @@ def _check_negative_utility_energy_prices(data: Any) -> list[str]:
     ]
 
 
-def _check_zero_demand_charge_rates(model: Any, data: Any) -> list[str]:
+def _check_zero_demand_charge_rates(model: pyo.Block, data: DataContainer) -> list[str]:
     rates_by_node = _extract_applicable_utility_demand_charge_rates_by_node(model, data)
     zero_nodes = [
         n for n, vals in rates_by_node.items()
@@ -246,7 +250,7 @@ def _check_zero_demand_charge_rates(model: Any, data: Any) -> list[str]:
     ]
 
 
-def _check_negative_demand_charge_rates(model: Any, data: Any) -> list[str]:
+def _check_negative_demand_charge_rates(model: pyo.Block, data: DataContainer) -> list[str]:
     rates_by_node = _extract_applicable_utility_demand_charge_rates_by_node(model, data)
     neg_nodes: list[str] = []
     neg_rates: list[float] = []
@@ -266,7 +270,7 @@ def _check_negative_demand_charge_rates(model: Any, data: Any) -> list[str]:
     ]
 
 
-def _check_negative_import_prices(data: Any) -> list[str]:
+def _check_negative_import_prices(data: DataContainer) -> list[str]:
     # Backward-compatible alias: earlier tests look for "-0.02" and "negative" substrings.
     return _check_negative_utility_energy_prices(data)
 
@@ -288,7 +292,9 @@ def _iter_technology_diagnostic_collectors():
             yield fn
 
 
-def _collect_technology_diagnostics(model: Any, data: Any, case_cfg: Any) -> list[str]:
+def _collect_technology_diagnostics(
+    model: pyo.Block, data: DataContainer, case_cfg: CaseConfig | None
+) -> list[str]:
     """Delegate equipment / O&M warnings to technology modules (plug-in discovery)."""
     out: list[str] = []
     for collect_fn in _iter_technology_diagnostic_collectors():
@@ -296,7 +302,7 @@ def _collect_technology_diagnostics(model: Any, data: Any, case_cfg: Any) -> lis
     return out
 
 
-def _check_demand_subhourly(model: Any, data: Any) -> list[str]:
+def _check_demand_subhourly(model: pyo.Block, data: DataContainer) -> list[str]:
     rates_by_node = _utility_rates_by_node(model, data)
     active_nodes = []
     for n, ur in rates_by_node.items():
@@ -323,9 +329,9 @@ def _check_demand_subhourly(model: Any, data: Any) -> list[str]:
 
 
 def collect_model_diagnostics(
-    model: Any,
-    data: Any,
-    case_cfg: Any = None,
+    model: pyo.Block,
+    data: DataContainer,
+    case_cfg: CaseConfig | None = None,
 ) -> list[str]:
     """Inspect built model and data; return human-readable warning strings (no side effects on the model)."""
     warnings: list[str] = []

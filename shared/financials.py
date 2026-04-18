@@ -33,7 +33,7 @@ def capital_recovery_factor(discount_rate: float, lifetime_years: float) -> floa
 
 
 def annualization_factor_debt_equity(
-    debt_fraction: float = 0.8,
+    debt_fraction: float = 0.5,
     debt_years: float = 10.0,
     debt_rate: float = 0.08,
     equity_years: float = 5.0,

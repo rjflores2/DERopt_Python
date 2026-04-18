@@ -49,15 +49,16 @@ def test_flat_demand_creates_month_peaks_only_for_months_in_run_and_uses_month_r
 
     m = build_model(data, technology_parameters={}, financials={})
     assert hasattr(m, "utility")
-    assert hasattr(m.utility, "P_flat_y2024_m0")
-    assert hasattr(m.utility, "P_flat_y2024_m1")
-    assert not hasattr(m.utility, "P_flat_y2024_m2")
+    flat_keys = set(m.utility.P_flat.keys())
+    assert (2024, 0, "electricity_load__x") in flat_keys
+    assert (2024, 1, "electricity_load__x") in flat_keys
+    assert (2024, 2, "electricity_load__x") not in flat_keys
 
     # Set imports so Jan peak=5 kW and Feb peak=7 kW
     m.utility.grid_import["electricity_load__x", 0].value = 5.0  # kWh in 1 hour => 5 kW
     m.utility.grid_import["electricity_load__x", 1].value = 7.0  # => 7 kW
-    m.utility.P_flat_y2024_m0["electricity_load__x"].value = 5.0
-    m.utility.P_flat_y2024_m1["electricity_load__x"].value = 7.0
+    m.utility.P_flat[2024, 0, "electricity_load__x"].value = 5.0
+    m.utility.P_flat[2024, 1, "electricity_load__x"].value = 7.0
 
     assert pyo.value(m.utility.nonTOU_Demand_Charge_Cost) == pytest.approx(10.0 * 5.0 + 20.0 * 7.0)
 
@@ -90,14 +91,15 @@ def test_flat_demand_multiyear_creates_separate_year_month_peaks():
     data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
 
     m = build_model(data, technology_parameters={}, financials={})
-    assert hasattr(m.utility, "P_flat_y2024_m0")
-    assert hasattr(m.utility, "P_flat_y2025_m0")
+    flat_keys = set(m.utility.P_flat.keys())
+    assert (2024, 0, "electricity_load__x") in flat_keys
+    assert (2025, 0, "electricity_load__x") in flat_keys
 
     # Set imports so the peaks differ by year.
     m.utility.grid_import["electricity_load__x", 0].value = 5.0
     m.utility.grid_import["electricity_load__x", 1].value = 7.0
-    m.utility.P_flat_y2024_m0["electricity_load__x"].value = 5.0
-    m.utility.P_flat_y2025_m0["electricity_load__x"].value = 7.0
+    m.utility.P_flat[2024, 0, "electricity_load__x"].value = 5.0
+    m.utility.P_flat[2025, 0, "electricity_load__x"].value = 7.0
 
     assert pyo.value(m.utility.nonTOU_Demand_Charge_Cost) == pytest.approx(10.0 * 5.0 + 10.0 * 7.0)
 
@@ -146,10 +148,11 @@ def test_tou_demand_creates_month_tier_peaks_only_when_tier_occurs_in_month():
 
     m = build_model(data, technology_parameters={}, financials={})
     assert hasattr(m, "utility")
-    assert hasattr(m.utility, "P_tou_y2024_m0_tier1")
-    assert hasattr(m.utility, "P_tou_y2024_m1_tier2")
-    assert not hasattr(m.utility, "P_tou_y2024_m0_tier2")
-    assert not hasattr(m.utility, "P_tou_y2024_m1_tier1")
+    tou_keys = set(m.utility.P_tou.keys())
+    assert (2024, 0, 1, "electricity_load__x") in tou_keys
+    assert (2024, 1, 2, "electricity_load__x") in tou_keys
+    assert (2024, 0, 2, "electricity_load__x") not in tou_keys
+    assert (2024, 1, 1, "electricity_load__x") not in tou_keys
 
 
 def test_tou_demand_charge_cost_sums_month_tier_peaks():
@@ -190,8 +193,8 @@ def test_tou_demand_charge_cost_sums_month_tier_peaks():
     data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
     m = build_model(data, technology_parameters={}, financials={})
     # Set peak variables directly; cost expression should be sum(rate * P) over created (month,tier) vars.
-    m.utility.P_tou_y2024_m0_tier1["electricity_load__x"].value = 5.0
-    m.utility.P_tou_y2024_m1_tier2["electricity_load__x"].value = 7.0
+    m.utility.P_tou[2024, 0, 1, "electricity_load__x"].value = 5.0
+    m.utility.P_tou[2024, 1, 2, "electricity_load__x"].value = 7.0
     assert pyo.value(m.utility.TOU_Demand_Charge_Cost) == pytest.approx(4.0 * 5.0 + 9.0 * 7.0)
 
 
@@ -225,11 +228,12 @@ def test_tou_demand_multiyear_creates_separate_year_month_peaks():
     data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
 
     m = build_model(data, technology_parameters={}, financials={})
-    assert hasattr(m.utility, "P_tou_y2024_m0_tier0")
-    assert hasattr(m.utility, "P_tou_y2025_m0_tier0")
+    tou_keys = set(m.utility.P_tou.keys())
+    assert (2024, 0, 0, "electricity_load__x") in tou_keys
+    assert (2025, 0, 0, "electricity_load__x") in tou_keys
 
-    m.utility.P_tou_y2024_m0_tier0["electricity_load__x"].value = 5.0
-    m.utility.P_tou_y2025_m0_tier0["electricity_load__x"].value = 7.0
+    m.utility.P_tou[2024, 0, 0, "electricity_load__x"].value = 5.0
+    m.utility.P_tou[2025, 0, 0, "electricity_load__x"].value = 7.0
     assert pyo.value(m.utility.TOU_Demand_Charge_Cost) == pytest.approx(4.0 * 5.0 + 4.0 * 7.0)
 
 
@@ -258,7 +262,7 @@ def test_subhourly_demand_charge_uses_power_conversion():
     data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
     m = build_model(data, technology_parameters={}, financials={})
     m.utility.grid_import["electricity_load__x", 0].value = 25.0
-    m.utility.P_flat_y2024_m0["electricity_load__x"].value = 0.0
+    m.utility.P_flat[2024, 0, "electricity_load__x"].value = 0.0
     power = pyo.value(m.utility.grid_import_power_kw["electricity_load__x", 0])
     assert power == pytest.approx(100.0)
 

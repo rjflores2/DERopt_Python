@@ -16,6 +16,13 @@ from typing import Any
 
 import pyomo.environ as pyo
 
+from data_loading.schemas import DataContainer
+from shared.cost_helpers import (
+    annualized_fixed_cost_by_node,
+    attach_standard_cost_expressions,
+    time_summed_variable_cost,
+)
+
 from .inputs import (
     FORMULATION_PEM_FUEL_CELL_BINARY,
     FORMULATION_PEM_FUEL_CELL_LP,
@@ -24,8 +31,8 @@ from .inputs import (
 
 
 def add_pem_fuel_cell_block(
-    model: Any,
-    data: Any,
+    model: pyo.Block,
+    data: DataContainer,
     *,
     pem_fuel_cell_params: dict[str, Any] | None = None,
     financials: dict[str, Any] | None = None,
@@ -34,8 +41,7 @@ def add_pem_fuel_cell_block(
     Build and attach the PEM fuel cell block (one node per load bus, one time index per period).
 
     1. Data and other inputs
-       - ``model.NODES``, ``model.T``
-       - ``data.static["time_step_hours"]`` (defaults to 1.0)
+       - ``model.NODES``, ``model.T``, ``model.time_step_hours``
        - ``data.timeseries`` — peak load per node for binary big-M
 
     2. Variables
@@ -59,7 +65,7 @@ def add_pem_fuel_cell_block(
     """
     T = model.T
     nodes = list(model.NODES)
-    dt_hours = float((getattr(data, "static", {}) or {}).get("time_step_hours") or 1.0)
+    dt_hours = float(pyo.value(model.time_step_hours))
 
     resolved = resolve_pem_fuel_cell_block_inputs(
         pem_fuel_cell_params,
@@ -78,9 +84,6 @@ def add_pem_fuel_cell_block(
         }
 
     def block_rule(fc_block):
-        fc_block.time_step_hours = pyo.Param(
-            initialize=resolved.time_step_hours, within=pyo.PositiveReals, mutable=True
-        )
         fc_block.capital_cost_per_kw = pyo.Param(
             initialize=resolved.capital_cost_per_kw, within=pyo.NonNegativeReals, mutable=True
         )
@@ -99,40 +102,40 @@ def add_pem_fuel_cell_block(
         fc_block.hydrogen_lhv_to_electric_efficiency = pyo.Param(
             initialize=resolved.hydrogen_lhv_to_electric_efficiency,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         fc_block.minimum_loading_fraction = pyo.Param(
-            initialize=resolved.minimum_loading_fraction, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.minimum_loading_fraction, within=pyo.NonNegativeReals, mutable=False
         )
         fc_block.unit_capacity_kw = pyo.Param(
-            initialize=resolved.unit_capacity_kw, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.unit_capacity_kw, within=pyo.NonNegativeReals, mutable=False
         )
         fc_block.existing_capacity_kw = pyo.Param(
             nodes,
             initialize=resolved.existing_capacity_kw_by_node,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         fc_block.existing_unit_count = pyo.Param(
             nodes,
             initialize=resolved.existing_unit_count_by_node,
             within=pyo.NonNegativeIntegers,
-            mutable=True,
+            mutable=False,
         )
         fc_block.capacity_adoption_limit_kw = pyo.Param(
             nodes,
             initialize=resolved.capacity_adoption_limit_kw_by_node,
             within=pyo.NonNegativeReals,
-            mutable=True,
+            mutable=False,
         )
         fc_block.unit_adoption_limit = pyo.Param(
             nodes,
             initialize=resolved.unit_adoption_limit_by_node,
             within=pyo.NonNegativeIntegers,
-            mutable=True,
+            mutable=False,
         )
         fc_block.amortization_factor = pyo.Param(
-            initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=False
         )
 
         fc_block.electricity_generation_kwh_electric = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
@@ -156,7 +159,7 @@ def add_pem_fuel_cell_block(
             fc_block.installed_electric_capacity_kw = pyo.Expression(nodes, rule=installed_kw_rule)
 
             def max_energy_per_timestep_rule(m, node):
-                return m.installed_electric_capacity_kw[node] * m.time_step_hours
+                return m.installed_electric_capacity_kw[node] * model.time_step_hours
 
             fc_block.max_electricity_kwh_electric_per_timestep = pyo.Expression(
                 nodes, rule=max_energy_per_timestep_rule
@@ -171,7 +174,7 @@ def add_pem_fuel_cell_block(
 
             if formulation == FORMULATION_PEM_FUEL_CELL_BINARY:
                 fc_block.maximum_load_kwh_per_timestep = pyo.Param(
-                    nodes, initialize=max_load_kwh_by_node, within=pyo.NonNegativeReals, mutable=True
+                    nodes, initialize=max_load_kwh_by_node, within=pyo.NonNegativeReals, mutable=False
                 )
                 fc_block.fuel_cell_on = pyo.Var(nodes, T, within=pyo.Binary)
 
@@ -189,24 +192,25 @@ def add_pem_fuel_cell_block(
                 fc_block.generation_commitment_big_m = pyo.Constraint(nodes, T, rule=generation_big_m_rule)
                 fc_block.generation_min_loading = pyo.Constraint(nodes, T, rule=generation_min_load_rule)
 
+            annualized_capital_if_adopted = None
+            fixed_om_adopted_if_adopted = None
             if allow_adoption:
-                fc_block.pem_fc_capital_costs = pyo.Expression(
-                    expr=sum(
-                        fc_block.capital_cost_per_kw
-                        * fc_block.capacity_adopted_kw[node]
-                        * fc_block.amortization_factor
-                        for node in nodes
-                    )
+                annualized_capital_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=fc_block.capital_cost_per_kw,
+                    capacity_var=fc_block.capacity_adopted_kw,
+                    nodes=nodes,
+                    amortization_factor=fc_block.amortization_factor,
                 )
-                fc_block.pem_fc_fixed_operations_and_maintenance = pyo.Expression(
-                    expr=sum(fc_block.fixed_om_per_kw_year * fc_block.capacity_adopted_kw[node] for node in nodes)
+                fixed_om_adopted_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=fc_block.fixed_om_per_kw_year,
+                    capacity_var=fc_block.capacity_adopted_kw,
+                    nodes=nodes,
                 )
-            else:
-                fc_block.pem_fc_capital_costs = pyo.Expression(expr=0.0)
-                fc_block.pem_fc_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
 
-            fc_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(fc_block.fixed_om_per_kw_year * fc_block.existing_capacity_kw[node] for node in nodes)
+            fixed_om_existing = annualized_fixed_cost_by_node(
+                cost_per_unit=fc_block.fixed_om_per_kw_year,
+                capacity_var=fc_block.existing_capacity_kw,
+                nodes=nodes,
             )
 
         else:  # unit_milp
@@ -236,11 +240,11 @@ def add_pem_fuel_cell_block(
                 return m.units_on[node, t] <= m.installed_unit_count[node]
 
             def generation_upper_units_rule(m, node, t):
-                cap_e = m.unit_capacity_kw * m.time_step_hours
+                cap_e = m.unit_capacity_kw * model.time_step_hours
                 return m.electricity_generation_kwh_electric[node, t] <= cap_e * m.units_on[node, t]
 
             def generation_lower_units_rule(m, node, t):
-                cap_e = m.unit_capacity_kw * m.time_step_hours
+                cap_e = m.unit_capacity_kw * model.time_step_hours
                 return m.electricity_generation_kwh_electric[node, t] >= (
                     m.minimum_loading_fraction * cap_e * m.units_on[node, t]
                 )
@@ -249,24 +253,25 @@ def add_pem_fuel_cell_block(
             fc_block.generation_upper_by_units = pyo.Constraint(nodes, T, rule=generation_upper_units_rule)
             fc_block.generation_lower_by_units = pyo.Constraint(nodes, T, rule=generation_lower_units_rule)
 
+            annualized_capital_if_adopted = None
+            fixed_om_adopted_if_adopted = None
             if allow_adoption:
-                fc_block.pem_fc_capital_costs = pyo.Expression(
-                    expr=sum(
-                        fc_block.capital_cost_per_unit
-                        * fc_block.units_adopted[node]
-                        * fc_block.amortization_factor
-                        for node in nodes
-                    )
+                annualized_capital_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=fc_block.capital_cost_per_unit,
+                    capacity_var=fc_block.units_adopted,
+                    nodes=nodes,
+                    amortization_factor=fc_block.amortization_factor,
                 )
-                fc_block.pem_fc_fixed_operations_and_maintenance = pyo.Expression(
-                    expr=sum(fc_block.fixed_om_per_unit_year * fc_block.units_adopted[node] for node in nodes)
+                fixed_om_adopted_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=fc_block.fixed_om_per_unit_year,
+                    capacity_var=fc_block.units_adopted,
+                    nodes=nodes,
                 )
-            else:
-                fc_block.pem_fc_capital_costs = pyo.Expression(expr=0.0)
-                fc_block.pem_fc_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
 
-            fc_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(fc_block.fixed_om_per_unit_year * fc_block.existing_unit_count[node] for node in nodes)
+            fixed_om_existing = annualized_fixed_cost_by_node(
+                cost_per_unit=fc_block.fixed_om_per_unit_year,
+                capacity_var=fc_block.existing_unit_count,
+                nodes=nodes,
             )
 
         fc_block.hydrogen_consumption_kwh_h2_lhv = pyo.Expression(
@@ -276,20 +281,22 @@ def add_pem_fuel_cell_block(
             / m.hydrogen_lhv_to_electric_efficiency,
         )
 
-        fc_block.pem_fc_variable_operating_costs = pyo.Expression(
-            expr=sum(
-                fc_block.variable_om_per_kwh_electric * fc_block.electricity_generation_kwh_electric[node, t]
-                for node in nodes
-                for t in T
-            )
+        variable_operating_cost = time_summed_variable_cost(
+            cost_per_unit=fc_block.variable_om_per_kwh_electric,
+            flow_var=fc_block.electricity_generation_kwh_electric,
+            nodes=nodes,
+            time_set=T,
         )
-        fc_block.objective_contribution = pyo.Expression(
-            expr=(
-                fc_block.pem_fc_capital_costs
-                + fc_block.pem_fc_fixed_operations_and_maintenance
-                + fc_block.pem_fc_variable_operating_costs
-            )
+
+        attach_standard_cost_expressions(
+            fc_block,
+            allow_adoption=allow_adoption,
+            fixed_om_existing=fixed_om_existing,
+            annualized_capital_if_adopted=annualized_capital_if_adopted,
+            fixed_om_adopted_if_adopted=fixed_om_adopted_if_adopted,
+            variable_operating_cost=variable_operating_cost,
         )
+
         fc_block.electricity_source_term = pyo.Expression(
             nodes, T, rule=lambda m, node, t: m.electricity_generation_kwh_electric[node, t]
         )

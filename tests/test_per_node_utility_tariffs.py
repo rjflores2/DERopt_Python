@@ -68,8 +68,10 @@ def test_demand_charge_components_only_include_nodes_with_demand_tariffs():
         "electricity_load__b": ParsedRate(rate_type="tou", utility="U", name="B", demand_charges=None),
     }
     m = build_model(data, technology_parameters={}, financials={})
-    assert hasattr(m.utility, "P_flat_y2024_m0")
-    assert list(m.utility.P_flat_y2024_m0.keys()) == ["electricity_load__a"]
+    nodes_with_flat_peak_for_jan_2024 = sorted(
+        node for (year, month, node) in m.utility.P_flat if (year, month) == (2024, 0)
+    )
+    assert nodes_with_flat_peak_for_jan_2024 == ["electricity_load__a"]
 
 
 def test_fixed_charges_are_billed_per_node_reporting_only():

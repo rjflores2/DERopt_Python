@@ -11,6 +11,13 @@ from typing import Any
 
 import pyomo.environ as pyo
 
+from data_loading.schemas import DataContainer
+from shared.cost_helpers import (
+    annualized_fixed_cost_by_node,
+    attach_standard_cost_expressions,
+    time_summed_variable_cost,
+)
+
 from .inputs import (
     FORMULATION_DIESEL_BINARY,
     FORMULATION_DIESEL_LP,
@@ -20,8 +27,8 @@ from .inputs import (
 
 
 def add_diesel_generator_block(
-    model: Any,
-    data: Any,
+    model: pyo.Block,
+    data: DataContainer,
     *,
     diesel_generator_params: dict[str, Any] | None = None,
     financials: dict[str, Any] | None = None,
@@ -44,7 +51,9 @@ def add_diesel_generator_block(
        - ``model.NODES`` -> node index used by the diesel block
 
     3. Variables (Pyomo ``Var``)
-       - Shared: ``diesel_generation[node, t]`` (continuous nonnegative)
+       - Shared: ``diesel_generation[node, t]`` (continuous nonnegative; **kWh per timestep**,
+         i.e. scaled by ``model.time_step_hours`` so capacity-kW × dt = kWh/period limits are
+         dimensionally consistent across the electricity balance)
        - ``diesel_lp``:
          - ``diesel_capacity_adopted[node]`` (continuous nonnegative, when adoption enabled)
        - ``diesel_binary``:
@@ -78,26 +87,29 @@ def add_diesel_generator_block(
        - ``electricity_source_term[node, t]`` -> diesel generation
 
     7. Contribution to the cost function
-       - ``diesel_capital_costs`` -> annualized adopted-capacity or adopted-unit capital cost
-       - ``diesel_fixed_operations_and_maintenance`` -> adopted asset fixed O&M
-       - ``diesel_variable_operating_costs`` -> variable O&M + fuel cost on generation
-       - ``objective_contribution`` -> sum of the three expressions above
-       - ``cost_non_optimizing_annual`` -> existing-asset fixed O&M (reporting only)
+       - ``diesel_variable_om_cost`` / ``diesel_fuel_cost`` (per-component sub-expressions)
+       - Standardized via ``shared.cost_helpers``: ``annual_capital_costs``,
+         ``fixed_om_adopted``, ``fixed_om_existing``, ``variable_operating_cost``
+         (= variable O&M + fuel), ``objective_contribution``, ``cost_non_optimizing_annual``
 
-    8. Constraints
+    8. Constraints (all ``diesel_generation`` terms are kWh/timestep; capacity (kW)
+       multiplies by ``model.time_step_hours`` to yield the kWh/period bound):
+
        - Shared:
          - generation nonnegative (via variable domain)
        - ``diesel_lp``:
-         - ``generation_limits``: generation <= installed continuous capacity
+         - ``generation_limits``: generation <= installed_capacity_kw * time_step_hours
        - ``diesel_binary``:
-         - ``generation_capacity_limit``: generation <= installed continuous capacity
+         - ``generation_capacity_limit``: generation <= installed_capacity_kw * time_step_hours
          - ``generation_commitment_big_m``: generation <= maximum_load_at_node * diesel_on
+           (``maximum_load_at_node`` is already kWh/timestep from the load series)
          - ``generation_min_loading``: minimum loading when ``diesel_on = 1``; when off, relaxed with
            ``maximum_load_at_node * (1 - diesel_on)``
        - ``diesel_unit_milp``:
          - ``units_on_limit``: units on <= installed units
-         - ``generation_upper_by_units``: generation <= unit_capacity * units_on
-         - ``generation_lower_by_units``: generation >= minimum_loading * unit_capacity * units_on
+         - ``generation_upper_by_units``: generation <= unit_capacity_kw * units_on * time_step_hours
+         - ``generation_lower_by_units``: generation >= minimum_loading * unit_capacity_kw *
+           units_on * time_step_hours
     """
     T = model.T
     nodes = list(model.NODES)
@@ -145,35 +157,35 @@ def add_diesel_generator_block(
             initialize=resolved.fuel_cost_per_kwh_diesel, within=pyo.NonNegativeReals, mutable=True
         )
         diesel_block.electric_efficiency = pyo.Param(
-            initialize=resolved.electric_efficiency, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.electric_efficiency, within=pyo.NonNegativeReals, mutable=False
         )
         # Diesel generator minimum part load fraction - fraction of nameplate capacity where feasible operation is possible
         diesel_block.minimum_loading_fraction = pyo.Param(
-            initialize=resolved.minimum_loading_fraction, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.minimum_loading_fraction, within=pyo.NonNegativeReals, mutable=False
         )
         # For MILP model, the capacity of a single diesel generator
         diesel_block.unit_capacity_kw = pyo.Param(
-            initialize=resolved.unit_capacity_kw, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.unit_capacity_kw, within=pyo.NonNegativeReals, mutable=False
         )
         # Any existing capacity on the node
         diesel_block.existing_capacity = pyo.Param(
-            nodes, initialize=resolved.existing_capacity_by_node, within=pyo.NonNegativeReals, mutable=True
+            nodes, initialize=resolved.existing_capacity_by_node, within=pyo.NonNegativeReals, mutable=False
         )
         # Any existing unit count on the node
         diesel_block.existing_unit_count = pyo.Param(
-            nodes, initialize=resolved.existing_unit_count_by_node, within=pyo.NonNegativeIntegers, mutable=True
+            nodes, initialize=resolved.existing_unit_count_by_node, within=pyo.NonNegativeIntegers, mutable=False
         )
         # Maximum additional capacity that can be adopted on the node
         diesel_block.capacity_adoption_limit = pyo.Param(
-            nodes, initialize=resolved.capacity_adoption_limit_by_node, within=pyo.NonNegativeReals, mutable=True
+            nodes, initialize=resolved.capacity_adoption_limit_by_node, within=pyo.NonNegativeReals, mutable=False
         )
         # Maximum additional unit count that can be adopted on the node
         diesel_block.unit_adoption_limit = pyo.Param(
-            nodes, initialize=resolved.unit_adoption_limit_by_node, within=pyo.NonNegativeIntegers, mutable=True
+            nodes, initialize=resolved.unit_adoption_limit_by_node, within=pyo.NonNegativeIntegers, mutable=False
         )
         # Amortization factor for capital cost
         diesel_block.amortization_factor = pyo.Param(
-            initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=True
+            initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=False
         )
         # Electrical output from a diesel generator - Used in all diesel formulations
         diesel_block.diesel_generation = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
@@ -193,26 +205,32 @@ def add_diesel_generator_block(
 
             if formulation == FORMULATION_DIESEL_LP:
                 def generation_limits_rule(m, node, t):
-                    return m.diesel_generation[node, t] <= m.installed_capacity[node]
+                    # kWh/timestep bound: installed kW * dt_hours.
+                    return m.diesel_generation[node, t] <= (
+                        m.installed_capacity[node] * model.time_step_hours
+                    )
 
                 diesel_block.generation_limits = pyo.Constraint(nodes, T, rule=generation_limits_rule)
             else:
-                # Peak load over the horizon (data.timeseries). Used as M in diesel_on linearization.
+                # Peak load over the horizon (data.timeseries; already in kWh/timestep). Used as M
+                # in diesel_on linearization; dimensionally matches diesel_generation (kWh/timestep).
                 # If other sinks can draw power beyond contemporaneous load, peak load may under-estimate max diesel output.
                 diesel_block.maximum_load_at_node = pyo.Param(
-                    nodes, initialize=max_load_by_node, within=pyo.NonNegativeReals, mutable=True
+                    nodes, initialize=max_load_by_node, within=pyo.NonNegativeReals, mutable=False
                 )
                 diesel_block.diesel_on = pyo.Var(nodes, T, within=pyo.Binary)
 
                 def generation_capacity_limit_rule(m, node, t):
-                    return m.diesel_generation[node, t] <= m.installed_capacity[node]
+                    return m.diesel_generation[node, t] <= (
+                        m.installed_capacity[node] * model.time_step_hours
+                    )
 
                 def generation_commitment_big_m_rule(m, node, t):
                     return m.diesel_generation[node, t] <= m.maximum_load_at_node[node] * m.diesel_on[node, t]
 
                 def generation_min_loading_rule(m, node, t):
                     return m.diesel_generation[node, t] >= (
-                        m.minimum_loading_fraction * m.installed_capacity[node]
+                        m.minimum_loading_fraction * m.installed_capacity[node] * model.time_step_hours
                         - m.maximum_load_at_node[node] * (1 - m.diesel_on[node, t])
                     )
 
@@ -226,30 +244,25 @@ def add_diesel_generator_block(
                     nodes, T, rule=generation_min_loading_rule
                 )
 
+            annualized_capital_if_adopted = None
+            fixed_om_adopted_if_adopted = None
             if allow_adoption:
-                diesel_block.diesel_capital_costs = pyo.Expression(
-                    expr=sum(
-                        diesel_block.capital_cost_per_kw
-                        * diesel_block.diesel_capacity_adopted[node]
-                        * diesel_block.amortization_factor
-                        for node in nodes
-                    )
+                annualized_capital_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=diesel_block.capital_cost_per_kw,
+                    capacity_var=diesel_block.diesel_capacity_adopted,
+                    nodes=nodes,
+                    amortization_factor=diesel_block.amortization_factor,
                 )
-                diesel_block.diesel_fixed_operations_and_maintenance = pyo.Expression(
-                    expr=sum(
-                        diesel_block.fixed_om_per_kw_year * diesel_block.diesel_capacity_adopted[node]
-                        for node in nodes
-                    )
+                fixed_om_adopted_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=diesel_block.fixed_om_per_kw_year,
+                    capacity_var=diesel_block.diesel_capacity_adopted,
+                    nodes=nodes,
                 )
-            else:
-                diesel_block.diesel_capital_costs = pyo.Expression(expr=0.0)
-                diesel_block.diesel_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
 
-            diesel_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(
-                    diesel_block.fixed_om_per_kw_year * diesel_block.existing_capacity[node]
-                    for node in nodes
-                )
+            fixed_om_existing = annualized_fixed_cost_by_node(
+                cost_per_unit=diesel_block.fixed_om_per_kw_year,
+                capacity_var=diesel_block.existing_capacity,
+                nodes=nodes,
             )
 
         else:
@@ -272,11 +285,17 @@ def add_diesel_generator_block(
                 return m.diesel_units_on[node, t] <= m.installed_unit_count[node]
 
             def generation_upper_by_units_rule(m, node, t):
-                return m.diesel_generation[node, t] <= m.unit_capacity_kw * m.diesel_units_on[node, t]
+                # kWh/timestep = unit_kw * units_on * dt_hours
+                return m.diesel_generation[node, t] <= (
+                    m.unit_capacity_kw * m.diesel_units_on[node, t] * model.time_step_hours
+                )
 
             def generation_lower_by_units_rule(m, node, t):
                 return m.diesel_generation[node, t] >= (
-                    m.minimum_loading_fraction * m.unit_capacity_kw * m.diesel_units_on[node, t]
+                    m.minimum_loading_fraction
+                    * m.unit_capacity_kw
+                    * m.diesel_units_on[node, t]
+                    * model.time_step_hours
                 )
 
             diesel_block.units_on_limit = pyo.Constraint(nodes, T, rule=units_on_limit_rule)
@@ -287,50 +306,56 @@ def add_diesel_generator_block(
                 nodes, T, rule=generation_lower_by_units_rule
             )
 
+            annualized_capital_if_adopted = None
+            fixed_om_adopted_if_adopted = None
             if allow_adoption:
-                diesel_block.diesel_capital_costs = pyo.Expression(
-                    expr=sum(
-                        diesel_block.capital_cost_per_unit
-                        * diesel_block.diesel_units_adopted[node]
-                        * diesel_block.amortization_factor
-                        for node in nodes
-                    )
+                annualized_capital_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=diesel_block.capital_cost_per_unit,
+                    capacity_var=diesel_block.diesel_units_adopted,
+                    nodes=nodes,
+                    amortization_factor=diesel_block.amortization_factor,
                 )
-                diesel_block.diesel_fixed_operations_and_maintenance = pyo.Expression(
-                    expr=sum(
-                        diesel_block.fixed_om_per_unit_year * diesel_block.diesel_units_adopted[node]
-                        for node in nodes
-                    )
+                fixed_om_adopted_if_adopted = annualized_fixed_cost_by_node(
+                    cost_per_unit=diesel_block.fixed_om_per_unit_year,
+                    capacity_var=diesel_block.diesel_units_adopted,
+                    nodes=nodes,
                 )
-            else:
-                diesel_block.diesel_capital_costs = pyo.Expression(expr=0.0)
-                diesel_block.diesel_fixed_operations_and_maintenance = pyo.Expression(expr=0.0)
 
-            diesel_block.cost_non_optimizing_annual = pyo.Expression(
-                expr=sum(
-                    diesel_block.fixed_om_per_unit_year * diesel_block.existing_unit_count[node]
-                    for node in nodes
-                )
+            fixed_om_existing = annualized_fixed_cost_by_node(
+                cost_per_unit=diesel_block.fixed_om_per_unit_year,
+                capacity_var=diesel_block.existing_unit_count,
+                nodes=nodes,
             )
 
-        diesel_block.diesel_variable_operating_costs = pyo.Expression(
-            expr=sum(
-                (
-                    diesel_block.variable_om_per_kwh
-                    + diesel_block.fuel_cost_per_kwh_diesel / diesel_block.electric_efficiency
-                )
-                * diesel_block.diesel_generation[node, t]
-                for node in nodes
-                for t in T
-            )
+        # Variable cost = variable O&M + fuel cost (per kWh of electricity generated, with
+        # fuel cost converted via electric efficiency). Built as two helper calls so each
+        # component is independently visible on the block for reporting.
+        diesel_block.diesel_variable_om_cost = time_summed_variable_cost(
+            cost_per_unit=diesel_block.variable_om_per_kwh,
+            flow_var=diesel_block.diesel_generation,
+            nodes=nodes,
+            time_set=T,
         )
-        diesel_block.objective_contribution = pyo.Expression(
-            expr=(
-                diesel_block.diesel_capital_costs
-                + diesel_block.diesel_fixed_operations_and_maintenance
-                + diesel_block.diesel_variable_operating_costs
-            )
+        diesel_block.diesel_fuel_cost = time_summed_variable_cost(
+            cost_per_unit=diesel_block.fuel_cost_per_kwh_diesel,
+            flow_var=diesel_block.diesel_generation,
+            nodes=nodes,
+            time_set=T,
+            efficiency_divisor=diesel_block.electric_efficiency,
         )
+        variable_operating_cost = pyo.Expression(
+            expr=diesel_block.diesel_variable_om_cost + diesel_block.diesel_fuel_cost
+        )
+
+        attach_standard_cost_expressions(
+            diesel_block,
+            allow_adoption=allow_adoption,
+            fixed_om_existing=fixed_om_existing,
+            annualized_capital_if_adopted=annualized_capital_if_adopted,
+            fixed_om_adopted_if_adopted=fixed_om_adopted_if_adopted,
+            variable_operating_cost=variable_operating_cost,
+        )
+
         diesel_block.electricity_source_term = pyo.Expression(
             nodes, T, rule=lambda m, node, t: m.diesel_generation[node, t]
         )

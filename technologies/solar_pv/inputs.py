@@ -17,6 +17,15 @@ DEFAULT_SOLAR_PV_PARAMS = {
     "existing_solar_capacity_by_node_and_profile": None,
     "existing_capital_recovery_per_kw_year": None,
     "use_marginal_capital_for_existing_recovery": False,
+    # Per-node resource override. Default is broadcast (same time series everywhere, matching
+    # pre-multi-resource behavior — correct for co-located nodes / single-site microgrids).
+    # Shape: dict[node, dict[profile_key, resource_timeseries_key]]
+    #        or equivalently dict[(node, profile_key), resource_timeseries_key].
+    # Only (node, profile) pairs that need a non-default time series must appear; any missing
+    # pair falls back to ``data.timeseries[profile_key]`` (the profile's canonical series).
+    # Use this when nodes are geographically separated enough that climate / microclimate /
+    # latitude produce materially different irradiance profiles.
+    "solar_resource_assignment_by_node_and_profile": None,
 }
 
 
@@ -33,6 +42,9 @@ class ResolvedSolarInputs:
     area_index: list[tuple[str, str]]
     max_capacity_area_by_node_profile: dict[tuple[str, str], float]
     amortization_factor: float
+    # Only (node, profile) pairs with an explicit override are present. Empty dict means
+    # "broadcast the canonical per-profile time series to every node" (default behavior).
+    resource_assignment_by_node_profile: dict[tuple[str, str], str]
 
 
 def _params_per_profile(
@@ -105,6 +117,66 @@ def _validate_solar_params(
                 f"solar_pv: efficiency for {profile_label!r} must be in (0, 1], got {efficiency}. "
                 "Check technology_parameters['solar_pv'] and params_by_profile."
             )
+
+
+def _resolve_resource_assignment(
+    nodes: list[str],
+    solar_profiles: list[str],
+    params: dict[str, Any],
+) -> dict[tuple[str, str], str]:
+    """Validate the optional per-(node, profile) resource override and return only the
+    explicitly-set entries. Missing entries are left out so the block falls back to the
+    canonical per-profile time series (broadcast behavior) without extra work.
+
+    Accepts either nested-dict (``{node: {profile: key}}``) or flat tuple-keyed
+    (``{(node, profile): key}``) input, matching the other solar *_by_node_and_profile
+    inputs.
+    """
+    raw = params.get("solar_resource_assignment_by_node_and_profile") or {}
+    out: dict[tuple[str, str], str] = {}
+    nodes_set = set(nodes)
+    profiles_set = set(solar_profiles)
+
+    if isinstance(raw, dict):
+        for outer_key, outer_value in raw.items():
+            if isinstance(outer_value, dict):
+                if outer_key not in nodes_set:
+                    raise ValueError(
+                        f"solar_pv: solar_resource_assignment_by_node_and_profile references "
+                        f"unknown node {outer_key!r}; known nodes: {sorted(nodes_set)!r}."
+                    )
+                for profile_key, resource_key in outer_value.items():
+                    if profile_key not in profiles_set:
+                        raise ValueError(
+                            f"solar_pv: solar_resource_assignment_by_node_and_profile[{outer_key!r}] "
+                            f"references unknown profile {profile_key!r}; "
+                            f"known profiles: {sorted(profiles_set)!r}."
+                        )
+                    if not isinstance(resource_key, str) or not resource_key:
+                        raise ValueError(
+                            f"solar_pv: resource key for (node={outer_key!r}, profile={profile_key!r}) "
+                            f"must be a non-empty string timeseries key; got {resource_key!r}."
+                        )
+                    out[(outer_key, profile_key)] = resource_key
+            elif isinstance(outer_key, tuple) and len(outer_key) == 2:
+                node, profile_key = outer_key
+                if node not in nodes_set:
+                    raise ValueError(
+                        f"solar_pv: solar_resource_assignment_by_node_and_profile references "
+                        f"unknown node {node!r}; known nodes: {sorted(nodes_set)!r}."
+                    )
+                if profile_key not in profiles_set:
+                    raise ValueError(
+                        f"solar_pv: solar_resource_assignment_by_node_and_profile references "
+                        f"unknown profile {profile_key!r}; known profiles: {sorted(profiles_set)!r}."
+                    )
+                if not isinstance(outer_value, str) or not outer_value:
+                    raise ValueError(
+                        f"solar_pv: resource key for (node={node!r}, profile={profile_key!r}) "
+                        f"must be a non-empty string timeseries key; got {outer_value!r}."
+                    )
+                out[(node, profile_key)] = outer_value
+    return out
 
 
 def _resolve_existing_capacity(
@@ -182,4 +254,7 @@ def resolve_solar_block_inputs(
         area_index=area_index,
         max_capacity_area_by_node_profile=max_capacity_area_by_node_profile,
         amortization_factor=amortization_factor,
+        resource_assignment_by_node_profile=_resolve_resource_assignment(
+            nodes, solar_profiles, params
+        ),
     )

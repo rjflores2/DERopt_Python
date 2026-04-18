@@ -1,15 +1,21 @@
 """PEM electrolyzer technology package."""
 
+from typing import Any
+
+import pyomo.environ as pyo
+
+from data_loading.schemas import DataContainer
+
 from .block import add_pem_electrolyzer_block
 
 
 def register(
-    model,
-    data,
+    model: pyo.Block,
+    data: DataContainer,
     *,
-    technology_parameters=None,
-    financials=None,
-):
+    technology_parameters: dict[str, Any] | None = None,
+    financials: dict[str, Any] | None = None,
+) -> pyo.Block:
     """
     Registry hook: build the PEM electrolyzer block.
 
