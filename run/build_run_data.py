@@ -15,6 +15,7 @@ from data_loading.loaders import (
     load_hydrokinetic_into_container,
     load_openei_rate,
     load_solar_into_container,
+    load_wind_into_container,
 )
 from data_loading.loaders.utility_rates import (
     get_import_prices_for_timestamps,
@@ -22,6 +23,8 @@ from data_loading.loaders.utility_rates import (
 )
 from data_loading.schemas import DataContainer
 from data_loading.time_subset import apply_time_subset
+
+from config.case_config import UtilityGridMode
 
 if TYPE_CHECKING:
     from config.case_config import CaseConfig, UtilityTariffConfig
@@ -125,6 +128,11 @@ def _load_resources(data: DataContainer, case_cfg: CaseConfig) -> None:
             raise FileNotFoundError(f"solar_path set but file missing: {case_cfg.solar_path}")
         load_solar_into_container(data, case_cfg.solar_path)
 
+    if case_cfg.wind_path is not None:
+        if not case_cfg.wind_path.exists():
+            raise FileNotFoundError(f"wind_path set but file missing: {case_cfg.wind_path}")
+        load_wind_into_container(data, case_cfg.wind_path)
+
     hkt_path = getattr(case_cfg, "hydrokinetic_path", None)
     if hkt_path is not None:
         if not hkt_path.exists():
@@ -143,6 +151,66 @@ def _load_resources(data: DataContainer, case_cfg: CaseConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _utility_mode(case_cfg: Any) -> UtilityGridMode:
+    """Return validated ``utility_mode`` (defaults to priced_grid for plain namespaces)."""
+    raw = getattr(case_cfg, "utility_mode", "priced_grid")
+    allowed: tuple[UtilityGridMode, ...] = ("priced_grid", "free_grid", "islanded")
+    if raw not in allowed:
+        raise ValueError(
+            f"utility_mode must be one of {list(allowed)}; got {raw!r}."
+        )
+    return raw
+
+
+def _validate_utility_mode_config(case_cfg: Any) -> None:
+    """Fail fast on contradictory or underspecified grid/utility configuration."""
+    mode = _utility_mode(case_cfg)
+    utility_tariffs = getattr(case_cfg, "utility_tariffs", None)
+    has_multi = utility_tariffs is not None
+    urp = getattr(case_cfg, "utility_rate_path", None)
+    epp = getattr(case_cfg, "energy_price_path", None)
+    has_single = urp is not None or epp is not None
+
+    if has_multi:
+        if mode == "islanded":
+            raise ValueError(
+                "utility_mode='islanded' cannot be combined with utility_tariffs "
+                "(multi-tariff runs require priced grid). Remove utility_tariffs or set "
+                "utility_mode='priced_grid'."
+            )
+        if mode == "free_grid":
+            raise ValueError(
+                "utility_mode='free_grid' cannot be combined with utility_tariffs. "
+                "Remove utility_tariffs or set utility_mode='priced_grid'."
+            )
+        if mode == "priced_grid":
+            for tcfg in utility_tariffs or []:
+                if tcfg.utility_rate_path is None and tcfg.energy_price_path is None:
+                    raise ValueError(
+                        f"utility_tariffs entry {tcfg.tariff_key!r} must set utility_rate_path "
+                        "and/or energy_price_path when utility_mode='priced_grid'."
+                    )
+    else:
+        if mode == "priced_grid" and not has_single:
+            raise ValueError(
+                "utility_mode='priced_grid' requires a utility price source: set "
+                "utility_rate_path, energy_price_path, or utility_tariffs on CaseConfig. "
+                "For intentional zero marginal cost grid imports, set utility_mode='free_grid'. "
+                "For no grid connection, set utility_mode='islanded'."
+            )
+        if mode == "free_grid" and has_single:
+            raise ValueError(
+                "utility_mode='free_grid' cannot be combined with utility_rate_path or "
+                "energy_price_path (contradictory). Remove those paths or use "
+                "utility_mode='priced_grid'."
+            )
+        if mode == "islanded" and has_single:
+            raise ValueError(
+                "utility_mode='islanded' cannot be combined with utility_rate_path or "
+                "energy_price_path. Remove those paths or use utility_mode='priced_grid'."
+            )
+
+
 def _load_utilities_single(
     data: DataContainer,
     case_cfg: CaseConfig,
@@ -153,6 +221,26 @@ def _load_utilities_single(
     """Populate ``data.import_prices_by_node`` / ``utility_rate_by_node`` from the legacy
     single-tariff fields on ``case_cfg`` (``utility_rate_path``, ``energy_price_path``, ...).
     """
+    mode = _utility_mode(case_cfg)
+    nodes = list(data.static.get("electricity_load_keys") or [])
+    if not nodes:
+        raise ValueError(
+            "single-tariff utility setup requires non-empty data.static['electricity_load_keys']."
+        )
+
+    if mode == "islanded":
+        data.import_prices_by_node = None
+        data.utility_rate_by_node = None
+        data.node_utility_tariff_key = None
+        return
+
+    if mode == "free_grid":
+        zero_prices = [0.0] * n_periods
+        data.import_prices_by_node = {node: zero_prices for node in nodes}
+        data.utility_rate_by_node = {node: None for node in nodes}
+        data.node_utility_tariff_key = {node: "default" for node in nodes}
+        return
+
     utility_rate, import_prices = _resolve_tariff_source(
         utility_rate_path=getattr(case_cfg, "utility_rate_path", None),
         utility_rate_item_index=getattr(case_cfg, "utility_rate_item_index", None),
@@ -162,13 +250,8 @@ def _load_utilities_single(
         n_periods=n_periods,
     )
 
-    nodes = list(data.static.get("electricity_load_keys") or [])
-    if not nodes:
-        raise ValueError(
-            "single-tariff utility setup requires non-empty data.static['electricity_load_keys']."
-        )
-
-    # Share one zero vector across nodes when no prices resolved (memory: O(T), not O(nodes*T)).
+    # Share one zero vector across nodes when no energy prices resolved but a tariff/rate
+    # object exists (e.g. demand-only or non-TOU OpenEI); memory: O(T), not O(nodes*T).
     zero_prices = [0.0] * n_periods
     node_prices = import_prices if import_prices is not None else zero_prices
     data.import_prices_by_node = {node: node_prices for node in nodes}
@@ -284,15 +367,17 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
     - Energy load (required)
     - Solar resource (if case_cfg.solar_path set)
     - Hydrokinetic resource (if case_cfg.hydrokinetic_path set)
-    - Utility: node-scoped import prices and optional rate metadata (if energy_price_path
-      or utility_rate_path set, or multi-tariff ``utility_tariffs`` provided). Resolves to
-      ``data.import_prices_by_node`` and ``data.utility_rate_by_node``.
+    - Utility: node-scoped import prices and optional rate metadata, controlled by
+      ``case_cfg.utility_mode`` (priced_grid / free_grid / islanded). Resolves to
+      ``data.import_prices_by_node`` and ``data.utility_rate_by_node`` when grid is modeled.
 
     Future: wind, export rates, time subset, post-processing can be added here
     without expanding the playground script.
     """
     data = load_energy_load(case_cfg.energy_load)
     _load_resources(data, case_cfg)
+
+    _validate_utility_mode_config(case_cfg)
 
     timestamps = data.timeseries.get("datetime") or []
     n_periods = len(data.indices.get("time") or [])

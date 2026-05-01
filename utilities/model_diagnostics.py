@@ -183,11 +183,17 @@ def _extract_applicable_utility_demand_charge_rates_by_node(
     return out
 
 
-def _check_utility_free_grid_zero_or_missing_costs(model: pyo.Block, data: DataContainer) -> list[str]:
+def _check_utility_free_grid_zero_or_missing_costs(
+    model: pyo.Block,
+    data: DataContainer,
+    case_cfg: CaseConfig | None,
+) -> list[str]:
     """
     Warn if decision variables exist but the decision-dependent *marginal* utility cost signal
     is effectively zero (energy import prices and demand-charge rates are all ~0).
     """
+    if getattr(case_cfg, "utility_mode", None) == "free_grid":
+        return []
     if not _utility_block_present(model) or not hasattr(model.utility, "grid_import"):
         return []
 
@@ -340,7 +346,7 @@ def collect_model_diagnostics(
     warnings.extend(_check_negative_demand_charge_rates(model, data))
     warnings.extend(_check_zero_demand_charge_rates(model, data))
     warnings.extend(_check_negative_import_prices(data))  # energy-side
-    warnings.extend(_check_utility_free_grid_zero_or_missing_costs(model, data))
+    warnings.extend(_check_utility_free_grid_zero_or_missing_costs(model, data, case_cfg))
     warnings.extend(_collect_technology_diagnostics(model, data, case_cfg))
     warnings.extend(_check_demand_subhourly(model, data))
     for fn in _extra_checks:

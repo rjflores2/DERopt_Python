@@ -12,7 +12,8 @@ This template is the **stable cross-run shape** for comparing studies. It is bui
        - ``collect_block_report(model, block, data, ctx) -> dict``
        - ``collect_block_timeseries(model, block, data, ctx) -> dict[str, list[float]]``
        - ``collect_block_emissions(model, block, data, ctx) -> dict``
-    Missing modules / missing hooks are silently skipped (no every tech needs them).
+    Missing ``.reporting`` submodules and missing hook names are skipped; import failures
+    in an existing reporting module are not swallowed.
 
 Callers can still pass a monolithic ``emissions_provider=f(model, data)`` which
 **overrides** the per-tech aggregation and fills the ``emissions`` section directly.
@@ -30,6 +31,7 @@ Sections
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from typing import Any, Callable
 
 import pyomo.environ as pyo
@@ -49,13 +51,18 @@ _HOOK_EMISSIONS = "collect_block_emissions"
 def _load_reporting_hooks(technology_module: str) -> dict[str, Callable]:
     """Import ``<technology_module>.reporting`` and return any hooks it defines.
 
-    Missing modules or missing hook names yield an empty dict (silent skip).
+    If the ``.reporting`` submodule does not exist (``find_spec`` is ``None``), returns
+    an empty dict. If it exists, it is imported without swallowing errors: failures inside
+    the reporting module (including ``ImportError`` from a broken sub-import) propagate.
+
+    Missing hook *names* on an otherwise valid module still yield an empty/partial dict only
+    for those names (same as before).
     """
     hooks: dict[str, Callable] = {}
-    try:
-        mod = importlib.import_module(f"{technology_module}.reporting")
-    except ImportError:
+    reporting_name = f"{technology_module}.reporting"
+    if importlib.util.find_spec(reporting_name) is None:
         return hooks
+    mod = importlib.import_module(reporting_name)
     for name in (_HOOK_REPORT, _HOOK_TIMESERIES, _HOOK_EMISSIONS):
         fn = getattr(mod, name, None)
         if callable(fn):

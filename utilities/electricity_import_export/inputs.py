@@ -55,6 +55,10 @@ def resolve_utility_inputs(model: pyo.Block, data: DataContainer) -> ResolvedUti
     import_prices_by_node = getattr(model, "import_prices_by_node", None)
     utility_rate_by_node = getattr(model, "utility_rate_by_node", None)
 
+    # Islanded / no utility data: both unset (not empty dicts filled with zeros upstream).
+    if import_prices_by_node is None and utility_rate_by_node is None:
+        return None
+
     T = model.T
     nodes = list(model.NODES)
     time_indices = list(T)

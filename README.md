@@ -183,12 +183,22 @@ Defaults and validation: `technologies/compressed_gas_hydrogen_storage/inputs.py
 
 ### Utility tariffs (single and multi-node)
 
+**`CaseConfig.utility_mode`** controls how grid imports are modeled (default **`"priced_grid"`**):
+
+| Mode | Meaning |
+|------|--------|
+| **`priced_grid`** | Grid import is allowed; you must supply real tariff/price inputs (`utility_rate_path`, `energy_price_path`, and/or `utility_tariffs`). If none are set, the run **raises** with a message explaining `free_grid` vs `islanded`. |
+| **`free_grid`** | Intentional **zero marginal cost** for grid imports (no tariff or price files). Use this when the old behavior (silent all-zero import prices) was what you wanted. |
+| **`islanded`** | **No utility / grid block**: `import_prices_by_node` and `utility_rate_by_node` stay unset, so there is no `grid_import` variable. You need other sources (generation, storage, etc.) to meet load. |
+
+These rules are enforced when **`build_run_data`** runs (after load/resources, before the utility maps are filled). Default **`priced_grid`** without any tariff or price source raises **`ValueError`**; contradictory combinations (e.g. `free_grid` plus `utility_rate_path`, or `utility_tariffs` with `islanded`) raise as well.
+
 Utility costs are attached via `utilities/electricity_import_export/`. The grid block is registered when **import energy prices**, **demand charges**, and/or **fixed customer charges** apply for at least one node; otherwise the block may be omitted.
 
 Supported case shapes:
 
 - **Single tariff** via `CaseConfig.utility_rate_path` (OpenEI-style JSON) and/or `CaseConfig.energy_price_path` (raw CSV series for \$/kWh)
-- **Multi-tariff** via `CaseConfig.utility_tariffs` with optional node exceptions in `CaseConfig.node_utility_tariff`
+- **Multi-tariff** via `CaseConfig.utility_tariffs` with optional node exceptions in `CaseConfig.node_utility_tariff` (implies **priced grid**; do not combine with `utility_mode="islanded"` or `"free_grid"`). With **`priced_grid`**, each `UtilityTariffConfig` must set **`utility_rate_path` and/or `energy_price_path`**.
 
 When using `utility_tariffs`, do not set the legacy single-tariff fields on `CaseConfig` at the same time (the loader raises).
 
@@ -216,6 +226,9 @@ Energy prices are resolved per node and aligned to model timesteps. For OpenEI T
        return CaseConfig(
            case_name="My Island",
            energy_load=EnergyLoadFileConfig(csv_path=load_path),
+           # Default utility_mode is priced_grid: add utility_rate_path / energy_price_path (or utility_tariffs).
+           # For a minimal runnable skeleton without rate files, use e.g. utility_mode="free_grid".
+           utility_mode="free_grid",
        )
    ```
 
@@ -232,6 +245,7 @@ No edits to `config/cases/__init__.py` or the playground are required; cases are
 The codebase is written to **fail fast with clear errors** instead of allowing silent failures that surface later or downstream.
 
 - **Config vs. missing files:** If case config sets a path (e.g. `solar_path`, `utility_rate_path`) and that path does not exist, the run **raises** (e.g. `FileNotFoundError`) with a message that includes the path. We do not silently skip or set a value to `None` when the user has asked for that file.
+- **Utility / grid mode:** With default **`utility_mode="priced_grid"`**, a case must configure tariff or price inputs (see [Utility tariffs](#utility-tariffs-single-and-multi-node)); otherwise **`build_run_data`** raises instead of assuming a zero-cost grid.
 - **Data validation:** Loaders and the model validate required fields (e.g. `electricity_load_keys`, `time`, `time_serial`) and **raise** with a clear message if something is missing. The model calls `data.validate_minimum_fields()` at entry so invalid data never propagates into the build.
 - **Loader and API contracts:** When a function is required to return a specific type (e.g. `ParsedRate` from a utility loader), we check the return value and **raise** with a descriptive error if it is `None` or the wrong type, rather than passing it downstream.
 - **Defensive checks:** For example, if `build_model` is called with data and returns `None`, the playground raises instead of continuing; technology parameter validation (e.g. solar efficiency in (0, 1]) raises so bad config is caught at build time.

@@ -19,6 +19,7 @@ MODULES = [
     "shared.financials",
     "technologies",
     "technologies.solar_pv",
+    "technologies.wind_turbine",
     "technologies.hydrokinetic",
     "technologies.battery_energy_storage",
     "technologies.flow_battery_energy_storage",

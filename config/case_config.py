@@ -2,7 +2,9 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+UtilityGridMode = Literal["priced_grid", "free_grid", "islanded"]
 
 from data_loading.time_subset import TimeSubsetConfig
 
@@ -26,6 +28,7 @@ class FinancialsConfig:
 _LOAD_EXTENSIONS = (".csv", ".xlsx", ".xls")
 _LOAD_PATTERN = "loads"
 _SOLAR_PATTERN = "solar"
+_WIND_PATTERN = "wind"
 # Hydrokinetic resource files: stem contains one of these (case-insensitive), e.g. hkt_potential.xlsx
 _HKT_STEM_SUBSTRINGS = ("hkt", "hydrokinetic")
 
@@ -66,6 +69,8 @@ class CaseConfig:
     energy_load: EnergyLoadFileConfig
     # Optional resource profile files (e.g. solar.csv). Path only; loader infers format.
     solar_path: Path | None = None
+    # Optional wind resource profile file (e.g. wind.csv). Path only; loader infers format.
+    wind_path: Path | None = None
     # Optional hydrokinetic profiles: one column per river location (.csv / .xlsx / .xls).
     hydrokinetic_path: Path | None = None
     # HKT files: power (kW) per timestamp; divide by this before × time_step_hours → kWh/kW (see loader).
@@ -90,6 +95,11 @@ class CaseConfig:
     energy_price_column: str | None = None
     # Optional reduced-horizon run mode for faster development iterations.
     time_subset: TimeSubsetConfig | None = None
+    # Grid / utility semantics (see README "Utility tariffs"):
+    # - priced_grid: require OpenEI/raw price inputs (default; fail fast if missing).
+    # - free_grid: intentional zero marginal cost for grid imports (no tariff/price files).
+    # - islanded: no utility block; leave import_prices_by_node unset.
+    utility_mode: UtilityGridMode = "priced_grid"
     # Optional multi-tariff model:
     # - first entry in utility_tariffs is the default tariff
     # - all nodes use default unless overridden in node_utility_tariff
@@ -158,6 +168,32 @@ def discover_solar_file(folder: Path) -> Path | None:
         if f.suffix.lower() not in _LOAD_EXTENSIONS:
             continue
         if _SOLAR_PATTERN.lower() not in f.stem.lower():
+            continue
+        candidates.append(f)
+    if not candidates:
+        return None
+    for ext in (".xlsx", ".csv", ".xls"):
+        for c in candidates:
+            if c.suffix.lower() == ext:
+                return c
+    return candidates[0]
+
+
+def discover_wind_file(folder: Path) -> Path | None:
+    """Find first csv/xlsx/xls file with 'wind' in name (case-insensitive).
+
+    Prefer xlsx > csv > xls. Returns None if no match (optional resource).
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return None
+    candidates: list[Path] = []
+    for f in folder.iterdir():
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in _LOAD_EXTENSIONS:
+            continue
+        if _WIND_PATTERN.lower() not in f.stem.lower():
             continue
         candidates.append(f)
     if not candidates:

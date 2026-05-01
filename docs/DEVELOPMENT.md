@@ -19,14 +19,30 @@ Unless `DEROPT_QUIET=1`, the playground prints **`electricity_load_keys`** and *
 | **Add a new utility rate parser** | In `data_loading/loaders/utility_rates/`, add a module (e.g. `pge.py`). Implement a loader that takes the OpenEI **rate item** dict and returns **`ParsedRate`**. Decorate with `@register_utility("Utility Display Name")`. Import side effects register the parser. |
 | **Add a new time series resource (e.g. wind)** | Prefer extending **`run/build_run_data.py`** after solar: load file, write into `data.timeseries` and `data.static` keys, keep lengths equal to `len(data.indices["time"])`. Add a technology block and **`REGISTRY`** entry. |
 | **Subset the time horizon** | Set `case_cfg.time_subset = TimeSubsetConfig(months=[1, 2], max_steps=744)` and/or `iso_weeks=...` in the case builder. Subsetting runs at the end of `build_run_data` and slices aligned series (including **`import_prices`** and **`import_prices_by_node`**). |
-| **Per-node tariffs** | Use **`CaseConfig.utility_tariffs`** (list of **`UtilityTariffConfig`**) and optional **`node_utility_tariff`** map from node key → `tariff_key`. Do not set legacy `utility_rate_path` / `energy_price_path` on `CaseConfig` when using `utility_tariffs` (the loader raises if both are present). |
+| **Per-node tariffs** | Use **`CaseConfig.utility_tariffs`** (list of **`UtilityTariffConfig`**) and optional **`node_utility_tariff`** map from node key → `tariff_key`. Requires **`utility_mode="priced_grid"`** (default). Do not set legacy `utility_rate_path` / `energy_price_path` on `CaseConfig` when using `utility_tariffs` (the loader raises if both are present). |
+
+
+### `DataContainer` fields (loaders → model)
+
+`data_loading/schemas.py` defines **`DataContainer`**: **`indices`**, **`timeseries`**, **`static`** (untyped `dict` values for series keys and metadata). **`validate_minimum_fields()`** only checks core load/time keys (`indices["time"]`, `timeseries["time_serial"]`, each `electricity_load__*` series); it does **not** validate utility attributes.
+
+**Typed optional utility attributes** (per-node is canonical for **`build_model`**):
+
+- **`import_prices_by_node`**: `dict[str, list[float]] | None` — \$ / kWh per timestep per node.
+- **`utility_rate_by_node`**: `dict[str, Any] | None` — optional **`ParsedRate`** (or `None`) per node for demand charges / fixed charges metadata.
+- **`node_utility_tariff_key`**: `dict[str, str] | None` — which `tariff_key` each node uses (multi-tariff runs).
+
+**Legacy single-vector fields** (still on the dataclass for older paths; **`model/core.py`** reads the per-node maps from **`data`**):
+
+- **`import_prices`**: `list[float] | None`
+- **`utility_rate`**: `Any | None`
 
 ## Data flow
 
-1. **`CaseConfig`** (`config/case_config.py`, built in `config/cases/*.py`): paths for load and optional solar, optional `technology_parameters`, `financials`, `time_subset`, utility fields (single-tariff **or** `utility_tariffs` bundle).
+1. **`CaseConfig`** (`config/case_config.py`, built in `config/cases/*.py`): paths for load and optional solar, optional `technology_parameters`, `financials`, `time_subset`, **`utility_mode`** (`priced_grid` | `free_grid` | `islanded`), and utility fields (single-tariff **or** `utility_tariffs` bundle).
 
 2. **`build_run_data`** (`run/build_run_data.py`):  
-   `load_energy_load` → optional `load_solar_into_container` → resolve utility(ies) into **`import_prices`** / **`import_prices_by_node`**, **`utility_rate`** / **`utility_rate_by_node`**, **`node_utility_tariff_key`** → optional **`apply_time_subset`**.
+   `load_energy_load` → optional resource loaders → **`_validate_utility_mode_config`** (paths vs. mode; multi-tariff conflicts; each `UtilityTariffConfig` must have a source when `priced_grid`) → resolve utility(ies) into **`import_prices`** / **`import_prices_by_node`**, **`utility_rate`** / **`utility_rate_by_node`**, **`node_utility_tariff_key`** (for **`islanded`**, the per-node maps stay **`None`**) → optional **`apply_time_subset`**.
 
 3. **`build_model`** (`model/core.py`):  
    Validates series lengths, attaches **`model.import_prices_by_node`** and **`model.utility_rate_by_node`**, iterates **`technologies.REGISTRY`**, then calls **`utilities.electricity_import_export.register`**. Builds electricity and hydrogen balances plus objective from block contributions.
@@ -104,5 +120,5 @@ The utility block and **`demand_charge_indexing.py`** map run **`datetimes`** an
 ## Conventions
 
 - **Fail fast:** Missing files, unknown keys in `node_utility_tariff`, length mismatches, or invalid parameters should **raise** with a short message.
-- **One container:** After `build_run_data`, **`DataContainer`** is the single source for series and static metadata the model consumes (plus attributes like **`import_prices_by_node`**).
+- **One container:** After `build_run_data`, **`DataContainer`** is the single source for series and static metadata the model consumes, including per-node utility maps when grid is modeled (**`import_prices_by_node`**, **`utility_rate_by_node`**, **`node_utility_tariff_key`**); **`islanded`** runs leave the per-node maps **`None`** so the utility block is not built.
 - **Single place for run data assembly:** Prefer extending **`build_run_data`** rather than growing **`playground.py`**.

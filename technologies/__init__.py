@@ -32,9 +32,11 @@ from technologies.hydrokinetic import register as register_hydrokinetic
 from technologies.pem_electrolyzer import register as register_pem_electrolyzer
 from technologies.pem_fuel_cell import register as register_pem_fuel_cell
 from technologies.solar_pv import register as register_solar_pv
+from technologies.wind_turbine import register as register_wind_turbine
 
 REGISTRY = [
     ("solar_pv", register_solar_pv),
+    ("wind_turbine", register_wind_turbine),
     ("battery_energy_storage", register_battery_energy_storage),
     ("flow_battery_energy_storage", register_flow_battery_energy_storage),
     ("diesel_generator", register_diesel_generator),

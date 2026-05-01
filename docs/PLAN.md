@@ -40,8 +40,8 @@ Design rules:
 3. Electricity **load** loader (CSV/XLSX/XLS), conditioning, multi-node keys (`electricity_load__*`).
 4. **Solar** resource loader aligned to load timestamps (time-of-year mapping); multi-profile keys (`solar_production__*`).
 5. **Hydrokinetic** resource loader and technology block (multi-profile keys, formulations aligned with other DER registry patterns).
-6. **Utility** pipeline: OpenEI router + utility-specific parsers (e.g. SCE), **TOU** import prices from schedules, **raw** CSV price override, **`utility_tariffs`** + **`node_utility_tariff`** for per-meter tariffs.
-7. **Utility block**: energy imports, **flat / TOU / combined** demand charges, **fixed customer charges** (horizon USD); attaches when any of those apply.
+6. **Utility** pipeline: OpenEI router + utility-specific parsers (e.g. SCE), **TOU** import prices from schedules, **raw** CSV price override, **`utility_tariffs`** + **`node_utility_tariff`** for per-meter tariffs; **`CaseConfig.utility_mode`** gates assembly in **`build_run_data`** (**`priced_grid`** requires sources; **`free_grid`** is explicit zero marginal import cost; **`islanded`** omits per-node utility maps—no implicit zero-cost grid by default).
+7. **Utility block**: energy imports, **flat / TOU / combined** demand charges, **fixed customer charges** (horizon USD); **`utilities.electricity_import_export`** attaches the block when resolved inputs include billable energy, demand, or fixed charges (and not when **`islanded`** leaves maps unset).
 8. **Core** model: per-node electricity and hydrogen balances, optimizing + non-optimizing cost reporting; registry technologies validated on attach (`model/contracts.py`).
 9. **Solar PV** block: per-node, per-profile capacity and generation; area limits; existing PV; optional capital recovery on existing.
 10. **Battery** and **flow-battery** blocks: SOC / charge / discharge, C-rates, adoption.

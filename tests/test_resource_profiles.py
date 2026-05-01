@@ -8,11 +8,13 @@ from config.case_config import (
     EnergyLoadFileConfig,
     discover_hydrokinetic_file,
     discover_solar_file,
+    discover_wind_file,
 )
 from data_loading.loaders.energy_load import load_energy_load
 from data_loading.loaders.resource_profiles import (
     load_hydrokinetic_into_container,
     load_solar_into_container,
+    load_wind_into_container,
 )
 from data_loading.schemas import DataContainer
 
@@ -136,6 +138,38 @@ def test_discover_solar_file_returns_none_when_empty(tmp_path: Path):
     """discover_solar_file returns None when no solar file in folder."""
     (tmp_path / "loads.csv").write_text("Date,Electric Demand (kW)\n1/1/2022,10\n")
     assert discover_solar_file(tmp_path) is None
+
+
+def test_wind_with_time_column(tmp_path: Path):
+    """Wind file with time column; align to load by time-of-year."""
+    load_path = tmp_path / "loads.csv"
+    load_path.write_text(
+        "Date,Electric Demand (kW)\n"
+        "1/1/2022 0:00,10.0\n"
+        "1/1/2022 1:00,11.0\n",
+        encoding="utf-8",
+    )
+    wind_path = tmp_path / "wind.csv"
+    wind_path.write_text(
+        "Date,Wind (kW/kW_cap)\n"
+        "1/1/2019 0:00,0.12\n"
+        "1/1/2019 1:00,0.25\n",
+        encoding="utf-8",
+    )
+    data = load_energy_load(EnergyLoadFileConfig(csv_path=load_path))
+    load_wind_into_container(data, wind_path)
+
+    assert data.static["wind_production_keys"] == ["wind_production__wind_kw_kw_cap"]
+    assert data.static["wind_production_units"] == "kWh/kW"
+    assert data.timeseries["wind_production__wind_kw_kw_cap"] == [0.12, 0.25]
+
+
+def test_discover_wind_file_finds_csv(tmp_path: Path):
+    """discover_wind_file returns csv/xlsx/xls with 'wind' in name."""
+    (tmp_path / "other.csv").write_text("x")
+    wind_path = tmp_path / "wind.csv"
+    wind_path.write_text("cf\n0.5\n")
+    assert discover_wind_file(tmp_path) == wind_path
 
 
 def test_hydrokinetic_multiple_location_columns(tmp_path: Path):

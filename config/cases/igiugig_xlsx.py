@@ -8,6 +8,7 @@ from config.case_config import (
     discover_hydrokinetic_file,
     discover_load_file,
     discover_solar_file,
+    discover_wind_file,
 )
 
 
@@ -18,11 +19,19 @@ def default_igiugig_xlsx_case(project_root: Path) -> CaseConfig:
     # Domestic TOU (no demand charges); use SCE_GS3_TOU.json for demand charges.
     rate_path = folder / "SCE_D_TOU.json"
     solar_path = discover_solar_file(folder)
-    tech_params = {"solar_pv": {}} if solar_path is not None else None
+    wind_path = discover_wind_file(folder)
+    tech_params: dict[str, dict] | None = None
+    if solar_path is not None or wind_path is not None:
+        tech_params = {}
+        if solar_path is not None:
+            tech_params["solar_pv"] = {}
+        if wind_path is not None:
+            tech_params["wind_turbine"] = {}
     return CaseConfig(
         case_name="Igiugig xlsx",
         energy_load=EnergyLoadFileConfig(csv_path=load_path),
         solar_path=solar_path,
+        wind_path=wind_path,
         hydrokinetic_path=discover_hydrokinetic_file(folder),
         technology_parameters=tech_params,
         utility_rate_path=rate_path,

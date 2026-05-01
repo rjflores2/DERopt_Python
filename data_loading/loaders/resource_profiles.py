@@ -388,6 +388,36 @@ def load_solar_into_container(
     )
 
 
+def load_wind_into_container(
+    data: DataContainer,
+    wind_path: Path,
+    *,
+    datetime_column: str | None = None,
+    wind_columns: list[str] | None = None,
+    treat_negative_as_missing: bool = True,
+    interpolation_method: str = "linear",
+) -> None:
+    """Load wind resource profile from CSV/Excel, aligned to load time vector.
+
+    Stored as ``wind_production__{suffix}`` in kWh per kW capacity (kWh/kW). File values are
+    treated as per-capacity power/capacity-factor style values and multiplied by
+    ``data.static["time_step_hours"]`` so output = value * dt_hours for each interval.
+    """
+    _load_resource_profile_file_into_container(
+        data,
+        wind_path,
+        timeseries_key_prefix="wind_production__",
+        static_keys_key="wind_production_keys",
+        static_units_key="wind_production_units",
+        static_columns_key="wind_production_columns",
+        resource_label="Wind",
+        datetime_column=datetime_column,
+        value_columns=wind_columns,
+        treat_negative_as_missing=treat_negative_as_missing,
+        interpolation_method=interpolation_method,
+    )
+
+
 def load_hydrokinetic_into_container(
     data: DataContainer,
     hydrokinetic_path: Path,
