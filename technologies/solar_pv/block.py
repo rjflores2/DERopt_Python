@@ -139,8 +139,7 @@ def add_solar_pv_block(
         solar_block.efficiency = pyo.Param(
             solar_block.SOLAR,
             initialize={
-                solar_profile: resolved.efficiency_list[profile_idx]
-                for profile_idx, solar_profile in enumerate(solar_profiles)
+                solar_profile: resolved.efficiency_list[solar_profile] for solar_profile in solar_profiles
             },
             within=pyo.NonNegativeReals,
             mutable=False,
@@ -148,18 +147,14 @@ def add_solar_pv_block(
         solar_block.capital_cost_per_kw = pyo.Param(
             solar_block.SOLAR,
             initialize={
-                solar_profile: resolved.capital_list[profile_idx]
-                for profile_idx, solar_profile in enumerate(solar_profiles)
+                solar_profile: resolved.capital_list[solar_profile] for solar_profile in solar_profiles
             },
             within=pyo.Reals,
             mutable=True,
         )
         solar_block.om_per_kw_year = pyo.Param(
             solar_block.SOLAR,
-            initialize={
-                solar_profile: resolved.om_list[profile_idx]
-                for profile_idx, solar_profile in enumerate(solar_profiles)
-            },
+            initialize={solar_profile: resolved.om_list[solar_profile] for solar_profile in solar_profiles},
             within=pyo.Reals,
             mutable=True,
         )
@@ -234,9 +229,9 @@ def add_solar_pv_block(
             expr=sum(
                 solar_block.om_per_kw_year[solar_profile]
                 * solar_block.existing_solar_capacity[node, solar_profile]
-                + resolved.existing_cap_recovery_per_kw[profile_idx]
+                + resolved.existing_cap_recovery_per_kw[solar_profile]
                 * solar_block.existing_solar_capacity[node, solar_profile]
-                for profile_idx, solar_profile in enumerate(solar_block.SOLAR)
+                for solar_profile in solar_block.SOLAR
                 for node in nodes
             )
         )

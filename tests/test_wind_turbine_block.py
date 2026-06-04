@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from data_loading.schemas import DataContainer
 from model.core import build_model
 
@@ -45,8 +47,5 @@ def test_wind_requested_without_resource_raises():
             "time_step_hours": 1.0,
         },
     )
-    try:
+    with pytest.raises(ValueError, match="was requested in technology_parameters"):
         build_model(data, technology_parameters={"wind_turbine": {}}, financials={})
-        assert False, "Expected build_model to raise when wind_turbine is requested without wind resource keys."
-    except ValueError as exc:
-        assert "was requested in technology_parameters" in str(exc)

@@ -158,6 +158,63 @@ def _raise_if_aligned_contains_nan(
         )
 
 
+def _linear_interpolate_series_to_target_minutes_trace(
+    series: pd.Series,
+    target_minutes: np.ndarray,
+    *,
+    interpolation_method: str,
+    treat_negative_as_missing: bool,
+) -> tuple[list[float], dict[str, np.ndarray]]:
+    """Same math as ``_linear_interpolate_series_to_target_minutes`` plus per-target diagnostics.
+
+    All returned arrays align with ``target_minutes`` (length n). Used by evidence tooling;
+    keep in sync with the non-trace function below.
+    """
+    s_grouped = series.groupby(series.index).mean().sort_index()
+    exact_raw = s_grouped.reindex(np.asarray(target_minutes, dtype=float))
+    raw_nan = np.asarray(pd.isna(exact_raw), dtype=bool)
+    raw_negative = np.asarray((exact_raw < 0) & pd.notna(exact_raw), dtype=bool)
+
+    s = s_grouped
+    if treat_negative_as_missing:
+        s = s.where(s >= 0)
+    s = s.interpolate(method="index", limit_direction="both")
+    s = s.ffill().bfill()
+    xp = np.asarray(s.index.values, dtype=float)
+    fp = np.asarray(s.values, dtype=float)
+    n = len(target_minutes)
+    if xp.size == 0 or fp.size == 0:
+        nan_arr = np.full(n, np.nan, dtype=float)
+        meta = {
+            "exact_toy_coerced_cf": nan_arr,
+            "flag_nan_exact_toy": raw_nan,
+            "flag_negative_exact_toy": raw_negative,
+            "cf_after_np_interp": nan_arr,
+            "cf_after_second_neg_mask": nan_arr,
+        }
+        return [float("nan")] * n, meta
+
+    x = np.asarray(target_minutes, dtype=float)
+    after_np = np.interp(x, xp, fp, left=float(fp[0]), right=float(fp[-1]))
+    ser = pd.Series(after_np)
+    after_second_mask = ser.where(ser >= 0) if treat_negative_as_missing else ser
+    ser2 = after_second_mask.interpolate(
+        method=interpolation_method, limit_direction="both"
+    )
+    filled = ser2.ffill().bfill()
+
+    meta = {
+        "exact_toy_coerced_cf": np.asarray(exact_raw.to_numpy(dtype=float), dtype=float),
+        "flag_nan_exact_toy": raw_nan,
+        "flag_negative_exact_toy": raw_negative,
+        "cf_after_np_interp": np.asarray(after_np, dtype=float),
+        "cf_after_second_neg_mask": np.asarray(
+            after_second_mask.to_numpy(dtype=float), dtype=float
+        ),
+    }
+    return [float(v) for v in filled.tolist()], meta
+
+
 def _linear_interpolate_series_to_target_minutes(
     series: pd.Series,
     target_minutes: np.ndarray,
@@ -166,23 +223,13 @@ def _linear_interpolate_series_to_target_minutes(
     treat_negative_as_missing: bool,
 ) -> list[float]:
     """1D linear interpolation in time-of-year minutes (smoother than nearest-neighbor)."""
-    s = series.groupby(series.index).mean().sort_index()
-    if treat_negative_as_missing:
-        s = s.where(s >= 0)
-    s = s.interpolate(method="index", limit_direction="both")
-    s = s.ffill().bfill()
-    xp = np.asarray(s.index.values, dtype=float)
-    fp = np.asarray(s.values, dtype=float)
-    if xp.size == 0 or fp.size == 0:
-        return [float("nan")] * len(target_minutes)
-    x = np.asarray(target_minutes, dtype=float)
-    out = np.interp(x, xp, fp, left=float(fp[0]), right=float(fp[-1]))
-    ser = pd.Series(out)
-    if treat_negative_as_missing:
-        ser = ser.where(ser >= 0)
-    ser = ser.interpolate(method=interpolation_method, limit_direction="both")
-    filled = ser.ffill().bfill()
-    return [float(v) for v in filled.tolist()]
+    out, _meta = _linear_interpolate_series_to_target_minutes_trace(
+        series,
+        target_minutes,
+        interpolation_method=interpolation_method,
+        treat_negative_as_missing=treat_negative_as_missing,
+    )
+    return out
 
 
 def _align_power_kw_columns_to_datetimes(

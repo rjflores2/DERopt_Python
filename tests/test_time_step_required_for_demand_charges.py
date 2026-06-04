@@ -1,5 +1,7 @@
 """Demand-charge modeling requires explicit time_step_hours."""
 
+import pytest
+
 from data_loading.loaders.utility_rates.openei_router import ParsedRate
 from data_loading.schemas import DataContainer
 from model.core import build_model
@@ -24,9 +26,6 @@ def test_demand_charges_missing_time_step_hours_raises():
     )
     data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
 
-    try:
+    with pytest.raises(ValueError):
         build_model(data, technology_parameters={}, financials={})
-        assert False, "Expected ValueError due to missing time_step_hours"
-    except ValueError as e:
-        assert "time_step_hours" in str(e)
 

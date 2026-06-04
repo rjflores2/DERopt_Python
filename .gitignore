@@ -1,5 +1,10 @@
 # Large/local input data
 data/
+documentation/
+.claude/
+
+# Generated figures
+figures/
 
 # Generated run outputs and reports
 outputs/

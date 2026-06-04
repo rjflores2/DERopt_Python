@@ -33,10 +33,10 @@ DEFAULT_SOLAR_PV_PARAMS = {
 class ResolvedSolarInputs:
     """Parameter-derived inputs for the solar block (no time series)."""
 
-    efficiency_list: list[float]
-    capital_list: list[float]
-    om_list: list[float]
-    existing_cap_recovery_per_kw: list[float]
+    efficiency_list: dict[str, float]
+    capital_list: dict[str, float]
+    om_list: dict[str, float]
+    existing_cap_recovery_per_kw: dict[str, float]
     existing_init: dict[tuple[str, str], float]
     has_area_limits: bool
     area_index: list[tuple[str, str]]
@@ -47,29 +47,35 @@ class ResolvedSolarInputs:
     resource_assignment_by_node_profile: dict[tuple[str, str], str]
 
 
+def _get_profile_overrides(
+    by_profile: dict | list | None,
+    profile_idx: int,
+    profile_key: str,
+) -> dict[str, Any]:
+    if by_profile is None:
+        return {}
+    if isinstance(by_profile, dict):
+        return (by_profile.get(profile_key) or {}).copy()
+    if isinstance(by_profile, list) and profile_idx < len(by_profile):
+        return (by_profile[profile_idx] or {}).copy()
+    return {}
+
+
 def _params_per_profile(
     solar_profiles: list[str],
     global_params: dict[str, Any],
-) -> tuple[list[float], list[float], list[float]]:
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     by_profile = global_params.get("params_by_profile")
-    efficiency_list: list[float] = []
-    capital_list: list[float] = []
-    om_list: list[float] = []
+    efficiency_list: dict[str, float] = {}
+    capital_list: dict[str, float] = {}
+    om_list: dict[str, float] = {}
 
     for profile_idx, solar_profile_key in enumerate(solar_profiles):
-        if by_profile is None:
-            overrides = {}
-        elif isinstance(by_profile, dict):
-            overrides = (by_profile.get(solar_profile_key) or {}).copy()
-        elif isinstance(by_profile, list) and profile_idx < len(by_profile):
-            overrides = (by_profile[profile_idx] or {}).copy()
-        else:
-            overrides = {}
-
+        overrides = _get_profile_overrides(by_profile, profile_idx, solar_profile_key)
         merged = {**global_params, **overrides}
-        efficiency_list.append(float(merged["efficiency"]))
-        capital_list.append(float(merged["capital_cost_per_kw"]))
-        om_list.append(float(merged["om_per_kw_year"]))
+        efficiency_list[solar_profile_key] = float(merged["efficiency"])
+        capital_list[solar_profile_key] = float(merged["capital_cost_per_kw"])
+        om_list[solar_profile_key] = float(merged["om_per_kw_year"])
 
     return efficiency_list, capital_list, om_list
 
@@ -77,44 +83,35 @@ def _params_per_profile(
 def _existing_capital_recovery_per_kw_list(
     solar_profiles: list[str],
     global_params: dict[str, Any],
-    capital_list: list[float],
+    capital_list: dict[str, float],
     amortization_factor: float,
-) -> list[float]:
+) -> dict[str, float]:
     by_profile = global_params.get("params_by_profile")
-    out: list[float] = []
+    out: dict[str, float] = {}
     for profile_idx, solar_profile_key in enumerate(solar_profiles):
-        if by_profile is None:
-            overrides: dict[str, Any] = {}
-        elif isinstance(by_profile, dict):
-            overrides = (by_profile.get(solar_profile_key) or {}).copy()
-        elif isinstance(by_profile, list) and profile_idx < len(by_profile):
-            overrides = (by_profile[profile_idx] or {}).copy()
-        else:
-            overrides = {}
+        overrides = _get_profile_overrides(by_profile, profile_idx, solar_profile_key)
         merged = {**global_params, **overrides}
         explicit = merged.get("existing_capital_recovery_per_kw_year")
         use_marginal = bool(merged.get("use_marginal_capital_for_existing_recovery", False))
-        cap_kw = capital_list[profile_idx]
+        cap_kw = capital_list[solar_profile_key]
         if explicit is not None:
-            out.append(float(explicit))
+            out[solar_profile_key] = float(explicit)
         elif use_marginal:
-            out.append(cap_kw * amortization_factor)
+            out[solar_profile_key] = cap_kw * amortization_factor
         else:
-            out.append(0.0)
+            out[solar_profile_key] = 0.0
     return out
 
 
 def _validate_solar_params(
     solar_profiles: list[str],
-    efficiency_list: list[float],
+    efficiency_list: dict[str, float],
 ) -> None:
-    for profile_idx, efficiency in enumerate(efficiency_list):
-        profile_label = (
-            solar_profiles[profile_idx] if profile_idx < len(solar_profiles) else f"profile index {profile_idx}"
-        )
+    for profile in solar_profiles:
+        efficiency = efficiency_list[profile]
         if efficiency <= 0 or efficiency > 1:
             raise ValueError(
-                f"solar_pv: efficiency for {profile_label!r} must be in (0, 1], got {efficiency}. "
+                f"solar_pv: efficiency for {profile!r} must be in (0, 1], got {efficiency}. "
                 "Check technology_parameters['solar_pv'] and params_by_profile."
             )
 
@@ -244,12 +241,23 @@ def resolve_solar_block_inputs(
                 area_index.append((node, profile))
                 max_capacity_area_by_node_profile[(node, profile)] = area_value
 
+    existing_init = _resolve_existing_capacity(nodes, solar_profiles, params)
+    for node, profile in area_index:
+        existing = existing_init[(node, profile)]
+        limit = max_capacity_area_by_node_profile[(node, profile)]
+        if existing > limit:
+            raise ValueError(
+                f"solar_pv: existing_solar_capacity at (node={node!r}, profile={profile!r}) is {existing} kW, "
+                f"which exceeds max_capacity_area limit {limit}. "
+                "Lower existing capacity or raise max_capacity_area_by_node_and_profile."
+            )
+
     return ResolvedSolarInputs(
         efficiency_list=efficiency_list,
         capital_list=capital_list,
         om_list=om_list,
         existing_cap_recovery_per_kw=existing_cap_recovery_per_kw,
-        existing_init=_resolve_existing_capacity(nodes, solar_profiles, params),
+        existing_init=existing_init,
         has_area_limits=bool(area_index),
         area_index=area_index,
         max_capacity_area_by_node_profile=max_capacity_area_by_node_profile,
