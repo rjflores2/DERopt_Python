@@ -92,7 +92,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-`pyproject.toml` sets `pythonpath = ["."]` for pytest so imports resolve without manual `PYTHONPATH`.
+`pytest.ini` sets `pythonpath = .` for pytest so imports resolve without manual `PYTHONPATH`.
 
 ## ParsedRate and the utility block
 

@@ -106,6 +106,81 @@ def _time_of_year_minutes(dt: datetime) -> float:
     return delta.total_seconds() / 60.0
 
 
+def _read_profile_minutes_frame(
+    file_path: Path,
+    *,
+    datetime_column: str | None,
+    sheet_name: int | str = 0,
+) -> tuple[pd.DataFrame, list[str], str | None]:
+    """Read a resource CSV/Excel file and index it by time-of-year minutes.
+
+    Shared by ``_load_resource_profile_file_into_container`` (solar/wind) and by
+    ``scripts/quarterly_solar_evidence.py`` (evidence tooling mirrors the real pipeline
+    up to numeric coercion, so both must use the same parsing/column-detection here).
+
+    Returns ``(profile_df, value_col_names, time_col)`` where ``profile_df`` is indexed
+    by time-of-year minutes and ``value_col_names`` are the (not-yet-coerced) data columns.
+    """
+    file_path = Path(file_path)
+    suffix = file_path.suffix.lower()
+    if suffix == ".xlsx":
+        df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, engine="openpyxl")
+    elif suffix == ".xls":
+        df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, engine="xlrd")
+    else:
+        df = pd.read_csv(file_path)
+
+    df = df.dropna(how="all", axis=0).dropna(how="all", axis=1)
+    if df.empty:
+        raise ValueError(f"No data rows in {file_path}")
+
+    df.columns = [str(c).strip() for c in df.columns]
+    raw_cols = list(df.columns)
+
+    time_col: str | None = None
+    if datetime_column and datetime_column in raw_cols:
+        time_col = datetime_column
+    else:
+        for cand in _TIME_COLUMN_CANDIDATES:
+            if cand in raw_cols:
+                time_col = cand
+                break
+        if time_col is None and len(raw_cols) > 0:
+            first = df.iloc[:, 0]
+            if pd.api.types.is_numeric_dtype(first):
+                sample = first.dropna()
+                if len(sample) > 0:
+                    v = sample.iloc[0]
+                    if v >= 2e4 or v >= 1e5:
+                        time_col = raw_cols[0]
+            elif first.astype(str).str.match(
+                r"^\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}", na=False
+            ).any():
+                time_col = raw_cols[0]
+
+    if time_col is not None:
+        value_col_names = [c for c in raw_cols if c != time_col]
+        time_parsed = _parse_time_column(df[time_col], file_path)
+        profile_df = df[value_col_names].copy()
+        profile_df.index = time_parsed
+        profile_df = profile_df.loc[profile_df.index.notna()]
+        minutes_of_year = profile_df.index.map(_time_of_year_minutes)
+        profile_df = profile_df.set_axis(minutes_of_year)
+    else:
+        n_rows = len(df)
+        interval_min = _infer_interval_minutes_from_row_count(n_rows)
+        synthetic_index = _build_synthetic_year_index(n_rows, interval_min)
+        value_col_names = raw_cols
+        profile_df = df[value_col_names].copy()
+        profile_df.index = synthetic_index
+        minutes_of_year = profile_df.index.map(_time_of_year_minutes)
+        profile_df = profile_df.set_axis(minutes_of_year)
+
+    if not value_col_names:
+        raise ValueError(f"No data columns in {file_path}")
+    return profile_df, value_col_names, time_col
+
+
 def _coerce_resource_value_columns_to_numeric(
     profile_df: pd.DataFrame, value_col_names: list[str]
 ) -> None:
@@ -302,60 +377,9 @@ def _load_resource_profile_file_into_container(
     if not target_datetimes:
         raise ValueError("DataContainer has no time vector (timeseries['datetime'] empty)")
 
-    suffix = file_path.suffix.lower()
-    if suffix == ".xlsx":
-        df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, engine="openpyxl")
-    elif suffix == ".xls":
-        df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, engine="xlrd")
-    else:
-        df = pd.read_csv(file_path)
-
-    df = df.dropna(how="all", axis=0).dropna(how="all", axis=1)
-    if df.empty:
-        raise ValueError(f"No data rows in {file_path}")
-
-    df.columns = [str(c).strip() for c in df.columns]
-    raw_cols = list(df.columns)
-
-    time_col: str | None = None
-    if datetime_column and datetime_column in raw_cols:
-        time_col = datetime_column
-    else:
-        for cand in _TIME_COLUMN_CANDIDATES:
-            if cand in raw_cols:
-                time_col = cand
-                break
-        if time_col is None and len(raw_cols) > 0:
-            first = df.iloc[:, 0]
-            if pd.api.types.is_numeric_dtype(first):
-                sample = first.dropna()
-                if len(sample) > 0:
-                    v = sample.iloc[0]
-                    if v >= 2e4 or v >= 1e5:
-                        time_col = raw_cols[0]
-            elif first.astype(str).str.match(r"^\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}", na=False).any():
-                time_col = raw_cols[0]
-
-    if time_col is not None:
-        value_col_names = [c for c in raw_cols if c != time_col]
-        time_parsed = _parse_time_column(df[time_col], file_path)
-        profile_df = df[value_col_names].copy()
-        profile_df.index = time_parsed
-        profile_df = profile_df.loc[profile_df.index.notna()]
-        minutes_of_year = profile_df.index.map(_time_of_year_minutes)
-        profile_df = profile_df.set_axis(minutes_of_year)
-    else:
-        n_rows = len(df)
-        interval_min = _infer_interval_minutes_from_row_count(n_rows)
-        synthetic_index = _build_synthetic_year_index(n_rows, interval_min)
-        value_col_names = raw_cols
-        profile_df = df[value_col_names].copy()
-        profile_df.index = synthetic_index
-        minutes_of_year = profile_df.index.map(_time_of_year_minutes)
-        profile_df = profile_df.set_axis(minutes_of_year)
-
-    if not value_col_names:
-        raise ValueError(f"No {resource_label} data columns in {file_path}")
+    profile_df, value_col_names, _time_col = _read_profile_minutes_frame(
+        file_path, datetime_column=datetime_column, sheet_name=sheet_name
+    )
 
     _coerce_resource_value_columns_to_numeric(profile_df, value_col_names)
     numeric_cols = _select_numeric_resource_columns(

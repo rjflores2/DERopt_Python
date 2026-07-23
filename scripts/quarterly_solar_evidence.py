@@ -54,13 +54,10 @@ import pandas as pd
 from config.case_config import EnergyLoadFileConfig
 from data_loading.loaders.energy_load import load_energy_load
 from data_loading.loaders.resource_profiles import (
-    _TIME_COLUMN_CANDIDATES,
-    _build_synthetic_year_index,
     _coerce_resource_value_columns_to_numeric,
-    _infer_interval_minutes_from_row_count,
     _linear_interpolate_series_to_target_minutes_trace,
     _normalize_series_key,
-    _parse_time_column,
+    _read_profile_minutes_frame,
     _select_numeric_resource_columns,
     _time_of_year_minutes,
     load_solar_into_container,
@@ -155,73 +152,6 @@ def _resolve_paths(
     return load_path, solar_path, solar_cols
 
 
-def _read_solar_profile_minutes_frame(
-    file_path: Path,
-    *,
-    datetime_column: str | None,
-    sheet_name: int | str,
-) -> tuple[pd.DataFrame, list[str], str | None]:
-    """Same parsing/indexing as ``_load_resource_profile_file_into_container`` up to coercion."""
-    file_path = Path(file_path)
-    suffix = file_path.suffix.lower()
-    if suffix == ".xlsx":
-        df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, engine="openpyxl")
-    elif suffix == ".xls":
-        df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, engine="xlrd")
-    else:
-        df = pd.read_csv(file_path)
-
-    df = df.dropna(how="all", axis=0).dropna(how="all", axis=1)
-    if df.empty:
-        raise ValueError(f"No data rows in {file_path}")
-
-    df.columns = [str(c).strip() for c in df.columns]
-    raw_cols = list(df.columns)
-
-    time_col: str | None = None
-    if datetime_column and datetime_column in raw_cols:
-        time_col = datetime_column
-    else:
-        for cand in _TIME_COLUMN_CANDIDATES:
-            if cand in raw_cols:
-                time_col = cand
-                break
-        if time_col is None and len(raw_cols) > 0:
-            first = df.iloc[:, 0]
-            if pd.api.types.is_numeric_dtype(first):
-                sample = first.dropna()
-                if len(sample) > 0:
-                    v = sample.iloc[0]
-                    if v >= 2e4 or v >= 1e5:
-                        time_col = raw_cols[0]
-            elif first.astype(str).str.match(
-                r"^\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}", na=False
-            ).any():
-                time_col = raw_cols[0]
-
-    if time_col is not None:
-        value_col_names = [c for c in raw_cols if c != time_col]
-        time_parsed = _parse_time_column(df[time_col], file_path)
-        profile_df = df[value_col_names].copy()
-        profile_df.index = time_parsed
-        profile_df = profile_df.loc[profile_df.index.notna()]
-        minutes_of_year = profile_df.index.map(_time_of_year_minutes)
-        profile_df = profile_df.set_axis(minutes_of_year)
-    else:
-        n_rows = len(df)
-        interval_min = _infer_interval_minutes_from_row_count(n_rows)
-        synthetic_index = _build_synthetic_year_index(n_rows, interval_min)
-        value_col_names = raw_cols
-        profile_df = df[value_col_names].copy()
-        profile_df.index = synthetic_index
-        minutes_of_year = profile_df.index.map(_time_of_year_minutes)
-        profile_df = profile_df.set_axis(minutes_of_year)
-
-    if not value_col_names:
-        raise ValueError(f"No solar data columns in {file_path}")
-    return profile_df, value_col_names, time_col
-
-
 def _pre_coerce_text_by_toy(profile_pre: pd.DataFrame, col: str) -> pd.Series:
     """One string per time-of-year minute (duplicate rows joined with '|')."""
 
@@ -303,7 +233,7 @@ def _build_evidence_table(
     datetime_column: str | None,
     sheet_name: int | str,
 ) -> pd.DataFrame:
-    profile_pre, value_col_names, _time_col = _read_solar_profile_minutes_frame(
+    profile_pre, value_col_names, _time_col = _read_profile_minutes_frame(
         solar_path, datetime_column=datetime_column, sheet_name=sheet_name
     )
     if value_col not in value_col_names:

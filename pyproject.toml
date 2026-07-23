@@ -26,7 +26,3 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
