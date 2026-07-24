@@ -7,10 +7,13 @@ Solar is modeled per node and per profile:
 - Profiles: fixed, 1-D tracking, etc. (data.static["solar_production_keys"]). Each
   profile has its own capacity and generation at each node.
 
-Decision variables: solar_capacity_adopted[node, profile], solar_generation[node, profile, t].
+Decision variables: solar_capacity_adopted[node, profile] (Stage-1, scenario-independent),
+solar_generation[node, profile, scenario, t] (Stage-2 dispatch, two-stage stochastic).
 Example: 3 nodes x 2 technologies = 6 capacity variables, each with its own constraints.
 
-Solar potential is indexed per (node, profile, t). By default each node uses the profile's
+Solar potential is indexed per (node, profile, scenario, t) -- a scenario without its own
+solar override falls back to the base series for every scenario (see
+shared.scenario_helpers.series_for_scenario). By default each node uses the profile's
 canonical time series (data.timeseries[profile_key]) — correct for co-located nodes /
 single-site microgrids where all nodes share the same irradiance. For geographically
 separated nodes (different latitude / microclimate), users can assign a distinct
@@ -33,6 +36,7 @@ from shared.cost_helpers import (
     annualized_fixed_cost_by_node_category,
     attach_standard_cost_expressions,
 )
+from shared.scenario_helpers import series_for_scenario
 
 from .inputs import resolve_solar_block_inputs
 
@@ -61,21 +65,23 @@ def add_solar_pv_block(
        - ``solar_block.AREA_LIMIT_INDEX`` -> index of ``(node, profile)`` pairs where an area limit is defined
 
     3. Variables (Pyomo ``Var``)
-       - ``solar_generation[node, solar_profile, t]`` -> kWh generated in period ``t``
-       - ``solar_capacity_adopted[node, solar_profile]`` -> additional kW to install if adoption is allowed
+       - ``solar_generation[node, solar_profile, scenario, t]`` -> kWh generated in period ``t``, per scenario
+       - ``solar_capacity_adopted[node, solar_profile]`` -> additional kW to install if adoption is allowed (Stage-1, scenario-independent)
 
     4. Parameters (Pyomo ``Param``)
-       - ``solar_potential[node, solar_profile, t]`` -> solar potential from ``data.timeseries``;
-         defaults to the profile's canonical series broadcast to every node, overridable per
-         (node, profile) via ``solar_resource_assignment_by_node_and_profile``
+       - ``solar_potential[node, solar_profile, scenario, t]`` -> solar potential from ``data.timeseries``
+         (or a scenario's own resource override); defaults to the profile's canonical series
+         broadcast to every node and scenario, overridable per (node, profile) via
+         ``solar_resource_assignment_by_node_and_profile`` and per-scenario via
+         ``CaseConfig.scenarios[*].solar_path``
        - ``efficiency[solar_profile]`` -> Solar PV system efficiency
        - ``capital_cost_per_kw[solar_profile]`` -> Solar PV capital cost ($/kW installed)
        - ``om_per_kw_year[solar_profile]`` -> Solar PV fixed O&M cost ($/kW-year)
        - ``existing_solar_capacity[node, solar_profile]`` -> existing solar capacity at each node (kW)
        - ``max_capacity_area[node, solar_profile]`` -> max allowable solar PV area on indexed pairs
 
-    5. Contribution to electricity sources - ``electricity_source_term[node, t]``
-       - sum of ``solar_generation[node, solar_profile, t]`` across all solar profiles
+    5. Contribution to electricity sources - ``electricity_source_term[node, scenario, t]``
+       - sum of ``solar_generation[node, solar_profile, scenario, t]`` across all solar profiles
 
     6. Contribution to the cost function - ``objective_contribution``
        - adopted solar capacity -> annualized capital on adopted kW plus fixed O&M on adopted kW
@@ -101,12 +107,15 @@ def add_solar_pv_block(
         solar_profiles=solar_profiles,
     )
 
-    # Build per-(node, profile) time series. Default: broadcast the profile's canonical
-    # series. Override: pull an alternate series from data.timeseries for any (node, profile)
-    # pair listed in the resource-assignment input. Missing pairs fall through to default.
+    # Build per-(node, profile, scenario) time series. Default: broadcast the profile's
+    # canonical series. Override: pull an alternate series from data.timeseries for any
+    # (node, profile) pair listed in the resource-assignment input. Missing pairs fall
+    # through to default. A scenario without its own solar override falls back to the same
+    # base series for every scenario (see shared.scenario_helpers.series_for_scenario).
     time_horizon_len = len(list(T))
+    scenario_keys = list(data.scenario_keys)
     resource_assignment = resolved.resource_assignment_by_node_profile
-    solar_potential_init: dict[tuple[str, str, int], float] = {}
+    solar_potential_init: dict[tuple[str, str, str, int], float] = {}
     for node in nodes:
         for solar_profile in solar_profiles:
             resource_key = resource_assignment.get((node, solar_profile), solar_profile)
@@ -116,14 +125,16 @@ def add_solar_pv_block(
                     f"not found in data.timeseries. Load the resource file into the container first, "
                     f"or use a key that exists."
                 )
-            series = list(data.timeseries[resource_key])
-            if len(series) < time_horizon_len:
-                raise ValueError(
-                    f"solar_pv: resource series {resource_key!r} has {len(series)} values but model "
-                    f"horizon T has {time_horizon_len}. Re-align the source data before loading."
-                )
-            for t in T:
-                solar_potential_init[(node, solar_profile, t)] = series[t]
+            for s in scenario_keys:
+                series = series_for_scenario(data, s, resource_key)
+                if len(series) < time_horizon_len:
+                    raise ValueError(
+                        f"solar_pv: scenario {s!r} resource series {resource_key!r} has "
+                        f"{len(series)} values but model horizon T has {time_horizon_len}. "
+                        "Re-align the source data before loading."
+                    )
+                for t in T:
+                    solar_potential_init[(node, solar_profile, s, t)] = series[t]
 
     def block_rule(solar_block):
         solar_block.SOLAR = pyo.Set(initialize=solar_profiles, ordered=True)
@@ -131,6 +142,7 @@ def add_solar_pv_block(
         solar_block.solar_potential = pyo.Param(
             model.NODES,
             solar_block.SOLAR,
+            model.SCENARIOS,
             T,
             initialize=solar_potential_init,
             within=pyo.NonNegativeReals,
@@ -174,18 +186,23 @@ def add_solar_pv_block(
                 mutable=False,
             )
 
-        solar_block.solar_generation = pyo.Var(nodes, solar_block.SOLAR, T, within=pyo.NonNegativeReals)
+        # Scenario-indexed (Stage-2 dispatch): each scenario gets its own generation trajectory.
+        solar_block.solar_generation = pyo.Var(
+            nodes, solar_block.SOLAR, model.SCENARIOS, T, within=pyo.NonNegativeReals
+        )
 
         if allow_adoption:
             solar_block.solar_capacity_adopted = pyo.Var(nodes, solar_block.SOLAR, within=pyo.NonNegativeReals)
 
-            def generation_limits_rule(m, node, profile, t):
-                return m.solar_generation[node, profile, t] <= (
+            def generation_limits_rule(m, node, profile, s, t):
+                return m.solar_generation[node, profile, s, t] <= (
                     (m.existing_solar_capacity[node, profile] + m.solar_capacity_adopted[node, profile])
-                    * m.solar_potential[node, profile, t]
+                    * m.solar_potential[node, profile, s, t]
                 )
 
-            solar_block.generation_limits = pyo.Constraint(nodes, solar_block.SOLAR, T, rule=generation_limits_rule)
+            solar_block.generation_limits = pyo.Constraint(
+                nodes, solar_block.SOLAR, model.SCENARIOS, T, rule=generation_limits_rule
+            )
 
             if resolved.has_area_limits:
                 def capacity_area_cap_rule(m, node, profile):
@@ -212,13 +229,13 @@ def add_solar_pv_block(
                 categories=solar_block.SOLAR,
             )
         else:
-            def generation_limits_rule_existing_only(m, node, profile, t):
-                return m.solar_generation[node, profile, t] <= (
-                    m.existing_solar_capacity[node, profile] * m.solar_potential[node, profile, t]
+            def generation_limits_rule_existing_only(m, node, profile, s, t):
+                return m.solar_generation[node, profile, s, t] <= (
+                    m.existing_solar_capacity[node, profile] * m.solar_potential[node, profile, s, t]
                 )
 
             solar_block.generation_limits = pyo.Constraint(
-                nodes, solar_block.SOLAR, T, rule=generation_limits_rule_existing_only
+                nodes, solar_block.SOLAR, model.SCENARIOS, T, rule=generation_limits_rule_existing_only
             )
             annualized_capital_if_adopted = None
             fixed_om_adopted_if_adopted = None
@@ -246,9 +263,10 @@ def add_solar_pv_block(
 
         solar_block.electricity_source_term = pyo.Expression(
             nodes,
+            model.SCENARIOS,
             T,
-            rule=lambda m, node, t: sum(
-                m.solar_generation[node, solar_profile, t] for solar_profile in m.SOLAR
+            rule=lambda m, node, s, t: sum(
+                m.solar_generation[node, solar_profile, s, t] for solar_profile in m.SOLAR
             ),
         )
 

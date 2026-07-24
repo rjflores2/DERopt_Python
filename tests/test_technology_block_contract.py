@@ -17,6 +17,7 @@ def _minimal_model() -> pyo.ConcreteModel:
     m = pyo.ConcreteModel()
     m.T = pyo.Set(initialize=[0], ordered=True)
     m.NODES = pyo.Set(initialize=["electricity_load__x"], ordered=True)
+    m.SCENARIOS = pyo.Set(initialize=["_default"], ordered=True)
     return m
 
 
@@ -34,10 +35,10 @@ def test_validate_passes_indexed_electricity_terms():
     b.objective_contribution = pyo.Expression(expr=0.0)
     b.cost_non_optimizing_annual = pyo.Expression(expr=0.0)
     b.electricity_source_term = pyo.Expression(
-        m.NODES, m.T, rule=lambda mm, n, t: 0.0
+        m.NODES, m.SCENARIOS, m.T, rule=lambda mm, n, s, t: 0.0
     )
     b.electricity_sink_term = pyo.Expression(
-        m.NODES, m.T, rule=lambda mm, n, t: 0.0
+        m.NODES, m.SCENARIOS, m.T, rule=lambda mm, n, s, t: 0.0
     )
     validate_technology_block_interface(technology_key="test_tech", block=b, model=m)
 
@@ -48,10 +49,10 @@ def test_validate_passes_indexed_hydrogen_terms():
     b = m.test_tech
     b.objective_contribution = pyo.Expression(expr=0.0)
     b.hydrogen_source_term = pyo.Expression(
-        m.NODES, m.T, rule=lambda mm, n, t: 0.0
+        m.NODES, m.SCENARIOS, m.T, rule=lambda mm, n, s, t: 0.0
     )
     b.hydrogen_sink_term = pyo.Expression(
-        m.NODES, m.T, rule=lambda mm, n, t: 0.0
+        m.NODES, m.SCENARIOS, m.T, rule=lambda mm, n, s, t: 0.0
     )
     validate_technology_block_interface(technology_key="test_tech", block=b, model=m)
 

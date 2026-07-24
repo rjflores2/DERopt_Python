@@ -41,10 +41,10 @@ def test_per_node_energy_prices_are_used():
     data.utility_rate_by_node = {"electricity_load__a": None, "electricity_load__b": None}
 
     m = build_model(data, technology_parameters={}, financials={})
-    m.utility.grid_import["electricity_load__a", 0].value = 1.0
-    m.utility.grid_import["electricity_load__a", 1].value = 2.0
-    m.utility.grid_import["electricity_load__b", 0].value = 3.0
-    m.utility.grid_import["electricity_load__b", 1].value = 4.0
+    m.utility.grid_import["electricity_load__a", "_default", 0].value = 1.0
+    m.utility.grid_import["electricity_load__a", "_default", 1].value = 2.0
+    m.utility.grid_import["electricity_load__b", "_default", 0].value = 3.0
+    m.utility.grid_import["electricity_load__b", "_default", 1].value = 4.0
 
     # 0.1*1 + 0.2*2 + 0.3*3 + 0.4*4 = 3.0
     assert pyo.value(m.utility.energy_import_cost) == pytest.approx(3.0)
@@ -69,7 +69,7 @@ def test_demand_charge_components_only_include_nodes_with_demand_tariffs():
     }
     m = build_model(data, technology_parameters={}, financials={})
     nodes_with_flat_peak_for_jan_2024 = sorted(
-        node for (year, month, node) in m.utility.P_flat if (year, month) == (2024, 0)
+        node for (year, month, node, scenario) in m.utility.P_flat if (year, month) == (2024, 0)
     )
     assert nodes_with_flat_peak_for_jan_2024 == ["electricity_load__a"]
 

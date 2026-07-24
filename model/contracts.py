@@ -1,8 +1,9 @@
 """Explicit contract for technology blocks attached from ``technologies.REGISTRY``.
 
 ``model.core`` balances electricity and hydrogen by summing optional
-``electricity_*_term`` / ``hydrogen_*_term`` on each top-level ``Block``, and sums
-``objective_contribution`` / ``cost_non_optimizing_annual`` for cost reporting.
+``electricity_*_term`` / ``hydrogen_*_term`` (each ``[node, scenario, t]``-indexed) on each
+top-level ``Block``, and sums ``objective_contribution`` / ``cost_non_optimizing_annual``
+(each scalar) for cost reporting.
 
 This module validates **registered** technology blocks after ``model.core`` confirms
 ``register()`` attached the returned Block as ``model.<technology_name>`` (see ``build_model``).
@@ -53,36 +54,45 @@ def _require_scalar_cost_component(technology_key: str, block: pyo.Block, attr: 
         )
 
 
-def _validate_indexed_nt(
+def _validate_indexed_nst(
     technology_key: str,
     block: pyo.Block,
     attr: str,
     model: pyo.ConcreteModel,
 ) -> None:
-    """Balance terms must support ``[node, t]`` for every pair in ``model.NODES`` and ``model.T``.
+    """Balance terms must support ``[node, scenario, t]`` for every triple in ``model.NODES``,
+    ``model.SCENARIOS``, and ``model.T``.
 
-    This is intentionally weaker than requiring ``component.index_set() == model.NODES * model.T``,
-    so aliases, ``Reference``, or equivalent index constructions still pass as long as the
+    This is intentionally weaker than requiring
+    ``component.index_set() == model.NODES * model.SCENARIOS * model.T``, so aliases,
+    ``Reference``, or equivalent index constructions still pass as long as the
     electricity/hydrogen balance in ``model.core`` can subscript them the same way.
+
+    Note: this is an O(N x S x T) Python-level loop per technology at build time. Fine at
+    today's scale; if build times become noticeable at large scenario counts, consider
+    sampling a subset of (n, s, t) triples or comparing ``component.index_set()`` directly
+    instead of a full Python loop.
     """
     comp = getattr(block, attr)
     if not _is_indexed_component(comp):
         raise ValueError(
             f"technology {technology_key!r}: {attr!r} must be an indexed Expression (or Var) "
-            f"over (node, time) to match electricity/hydrogen balance in model.core."
+            f"over (node, scenario, time) to match electricity/hydrogen balance in model.core."
         )
     nodes = list(model.NODES)
+    scenarios = list(model.SCENARIOS)
     times = list(model.T)
     for n in nodes:
-        for t in times:
-            try:
-                comp[n, t]
-            except Exception as exc:
-                raise ValueError(
-                    f"technology {technology_key!r}: {attr!r} must be subscriptable at every "
-                    f"(node, time) in model.NODES x model.T; failed at ({n!r}, {t!r}). "
-                    f"Underlying error: {exc}"
-                ) from exc
+        for s in scenarios:
+            for t in times:
+                try:
+                    comp[n, s, t]
+                except Exception as exc:
+                    raise ValueError(
+                        f"technology {technology_key!r}: {attr!r} must be subscriptable at every "
+                        f"(node, scenario, time) in model.NODES x model.SCENARIOS x model.T; "
+                        f"failed at ({n!r}, {s!r}, {t!r}). Underlying error: {exc}"
+                    ) from exc
 
 
 def validate_technology_block_interface(
@@ -98,16 +108,19 @@ def validate_technology_block_interface(
 
     Optional (validated when present):
         - ``cost_non_optimizing_annual``: scalar reporting-only cost.
-        - ``electricity_source_term`` / ``electricity_sink_term``: indexed ``[node, t]``.
-        - ``hydrogen_source_term`` / ``hydrogen_sink_term``: indexed ``[node, t]``.
+        - ``electricity_source_term`` / ``electricity_sink_term``: indexed ``[node, scenario, t]``.
+        - ``hydrogen_source_term`` / ``hydrogen_sink_term``: indexed ``[node, scenario, t]``.
 
     A technology may define only electricity terms, only hydrogen terms, both, or neither
     (e.g. hypothetical pure-capacity placeholder), as long as objective exists and any
-    present balance term is correctly indexed.
+    present balance term is correctly indexed. Capacity/adoption ("Stage-1") components stay
+    unindexed by scenario and are not covered by this contract (only the four balance-term
+    attributes above are).
     """
-    if not hasattr(model, "NODES") or not hasattr(model, "T"):
+    if not hasattr(model, "NODES") or not hasattr(model, "SCENARIOS") or not hasattr(model, "T"):
         raise RuntimeError(
-            "validate_technology_block_interface requires model.NODES and model.T (internal error)."
+            "validate_technology_block_interface requires model.NODES, model.SCENARIOS, and "
+            "model.T (internal error)."
         )
 
     _require_scalar_cost_component(technology_key, block, TECH_OBJECTIVE_CONTRIBUTION)
@@ -115,4 +128,4 @@ def validate_technology_block_interface(
 
     for attr in _INDEXED_BALANCE_ATTRS:
         if hasattr(block, attr):
-            _validate_indexed_nt(technology_key, block, attr, model)
+            _validate_indexed_nst(technology_key, block, attr, model)

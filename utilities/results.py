@@ -101,16 +101,25 @@ def extract_solution(model: pyo.ConcreteModel, data: DataContainer) -> dict[str,
         timeseries["electricity_source_kwh_by_block"] = by_block_source
 
     # Utility import price is not part of the overarching schema (it's an input-facing
-    # signal, not a solution output), so the adapter computes it directly.
+    # signal, not a solution output), so the adapter computes it directly. import_price is
+    # [node, scenario, t]-indexed (two-stage stochastic); report the probability-weighted
+    # expected price across scenarios, node-averaged, matching the rest of the reporting
+    # layer's expected-value convention.
     if hasattr(model, "utility") and hasattr(model.utility, "import_price"):
         ub = model.utility
-        try:
-            timeseries["import_price_per_kwh"] = [
-                float(sum(pyo.value(ub.import_price[n, t]) for n in NODES) / max(1, len(NODES)))
-                for t in T
-            ]
-        except Exception:
-            timeseries["import_price_per_kwh"] = [float(pyo.value(ub.import_price[t])) for t in T]
+        scenarios = list(model.SCENARIOS)
+        probs = {s: float(pyo.value(model.scenario_probability[s])) for s in scenarios}
+        timeseries["import_price_per_kwh"] = [
+            float(
+                sum(
+                    probs[s] * pyo.value(ub.import_price[n, s, t])
+                    for n in NODES
+                    for s in scenarios
+                )
+                / max(1, len(NODES))
+            )
+            for t in T
+        ]
 
     datetimes = getattr(data, "timeseries", {}).get("datetime") if data else None
     if datetimes is not None and len(datetimes) == n_time:

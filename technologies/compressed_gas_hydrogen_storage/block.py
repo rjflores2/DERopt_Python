@@ -11,6 +11,10 @@ Unlike the battery, **charging hydrogen into this storage** draws **auxiliary el
 (compressor work) from the electricity balance: ``electricity_sink_term = compression coefficient ×
 hydrogen_charge_flow``. The coefficient ``compression_kwh_electric_per_kwh_h2_lhv`` is documented as
 **compressed-gas** auxiliary load per kWh-H2 (LHV) charged; liquefaction is **not** modeled explicitly here.
+
+Inventory is scenario-indexed (Stage-2): each scenario gets its own independent inventory
+trajectory, including its own cyclic wraparound -- energy capacity itself (Stage-1) stays
+scenario-independent.
 """
 
 from __future__ import annotations
@@ -46,10 +50,10 @@ def add_compressed_gas_hydrogen_storage_block(
        - ``model.T``, ``model.NODES``
 
     3. Variables
-       - ``hydrogen_inventory_kwh_h2_lhv[node, t]`` — stored hydrogen energy (LHV)
-       - ``hydrogen_charge_flow[node, t]`` — kWh-H2_LHV per timestep charged (withdrawn from H2 balance)
-       - ``hydrogen_discharge_flow[node, t]`` — kWh-H2_LHV per timestep discharged (injected to H2 balance)
-       - ``energy_capacity_adopted_kwh_h2_lhv[node]`` when adoption is enabled
+       - ``hydrogen_inventory_kwh_h2_lhv[node, scenario, t]`` — stored hydrogen energy (LHV); Stage-2, per scenario
+       - ``hydrogen_charge_flow[node, scenario, t]`` — kWh-H2_LHV per timestep charged (withdrawn from H2 balance)
+       - ``hydrogen_discharge_flow[node, scenario, t]`` — kWh-H2_LHV per timestep discharged (injected to H2 balance)
+       - ``energy_capacity_adopted_kwh_h2_lhv[node]`` when adoption is enabled (Stage-1, scenario-independent)
 
     4. Parameters
        - Efficiencies, retention, min/max inventory fractions, C-rate-style limits on charge/discharge
@@ -60,11 +64,11 @@ def add_compressed_gas_hydrogen_storage_block(
     5. Named expressions
        - ``total_energy_capacity_kwh_h2_lhv[node]`` — tank energy capacity (LHV basis)
 
-    6. Hydrogen balance
+    6. Hydrogen balance - ``[node, scenario, t]``
        - ``hydrogen_sink_term`` = ``hydrogen_charge_flow``
        - ``hydrogen_source_term`` = ``hydrogen_discharge_flow``
 
-    7. Electricity balance
+    7. Electricity balance - ``[node, scenario, t]``
        - ``electricity_sink_term`` = ``compression_kwh_electric_per_kwh_h2_lhv * hydrogen_charge_flow``
 
     8. Objective
@@ -156,9 +160,12 @@ def add_compressed_gas_hydrogen_storage_block(
                 mutable=False,
             )
 
-        h2_block.hydrogen_inventory_kwh_h2_lhv = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
-        h2_block.hydrogen_charge_flow = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
-        h2_block.hydrogen_discharge_flow = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
+        # Scenario-indexed (Stage-2 dispatch): see battery_energy_storage/block.py for the
+        # detailed note on why the cyclic wraparound stays scenario-safe as long as every
+        # reference below carries the same s.
+        h2_block.hydrogen_inventory_kwh_h2_lhv = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals)
+        h2_block.hydrogen_charge_flow = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals)
+        h2_block.hydrogen_discharge_flow = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals)
 
         if allow_adoption:
             h2_block.energy_capacity_adopted_kwh_h2_lhv = pyo.Var(nodes, within=pyo.NonNegativeReals)
@@ -173,71 +180,85 @@ def add_compressed_gas_hydrogen_storage_block(
 
         h2_block.total_energy_capacity_kwh_h2_lhv = pyo.Expression(nodes, rule=total_energy_capacity_kwh_h2_lhv)
 
-        def inventory_minimum_rule(m, node, t):
+        def inventory_minimum_rule(m, node, s, t):
             return (
-                m.hydrogen_inventory_kwh_h2_lhv[node, t]
+                m.hydrogen_inventory_kwh_h2_lhv[node, s, t]
                 >= m.minimum_hydrogen_inventory_fraction * m.total_energy_capacity_kwh_h2_lhv[node]
             )
 
-        def inventory_maximum_rule(m, node, t):
+        def inventory_maximum_rule(m, node, s, t):
             return (
-                m.hydrogen_inventory_kwh_h2_lhv[node, t]
+                m.hydrogen_inventory_kwh_h2_lhv[node, s, t]
                 <= m.maximum_hydrogen_inventory_fraction * m.total_energy_capacity_kwh_h2_lhv[node]
             )
 
-        h2_block.hydrogen_inventory_minimum = pyo.Constraint(nodes, T, rule=inventory_minimum_rule)
-        h2_block.hydrogen_inventory_maximum = pyo.Constraint(nodes, T, rule=inventory_maximum_rule)
+        h2_block.hydrogen_inventory_minimum = pyo.Constraint(
+            nodes, model.SCENARIOS, T, rule=inventory_minimum_rule
+        )
+        h2_block.hydrogen_inventory_maximum = pyo.Constraint(
+            nodes, model.SCENARIOS, T, rule=inventory_maximum_rule
+        )
 
         # C-rate (1/hour): max kWh-H2 charged per hour per kWh capacity. Multiply by
         # ``time_step_hours`` to bound the kWh-H2-per-timestep flow variable.
-        def hydrogen_charge_limit_rule(m, node, t):
-            return m.hydrogen_charge_flow[node, t] <= (
+        def hydrogen_charge_limit_rule(m, node, s, t):
+            return m.hydrogen_charge_flow[node, s, t] <= (
                 m.max_hydrogen_charge_per_kwh_capacity
                 * m.total_energy_capacity_kwh_h2_lhv[node]
                 * model.time_step_hours
             )
 
-        def hydrogen_discharge_limit_rule(m, node, t):
-            return m.hydrogen_discharge_flow[node, t] <= (
+        def hydrogen_discharge_limit_rule(m, node, s, t):
+            return m.hydrogen_discharge_flow[node, s, t] <= (
                 m.max_hydrogen_discharge_per_kwh_capacity
                 * m.total_energy_capacity_kwh_h2_lhv[node]
                 * model.time_step_hours
             )
 
-        h2_block.hydrogen_charge_limit = pyo.Constraint(nodes, T, rule=hydrogen_charge_limit_rule)
-        h2_block.hydrogen_discharge_limit = pyo.Constraint(nodes, T, rule=hydrogen_discharge_limit_rule)
+        h2_block.hydrogen_charge_limit = pyo.Constraint(
+            nodes, model.SCENARIOS, T, rule=hydrogen_charge_limit_rule
+        )
+        h2_block.hydrogen_discharge_limit = pyo.Constraint(
+            nodes, model.SCENARIOS, T, rule=hydrogen_discharge_limit_rule
+        )
 
-        def hydrogen_inventory_balance_rule(m, node, t):
+        def hydrogen_inventory_balance_rule(m, node, s, t):
             time_step_index = time_index[t]
             previous_time_step = horizon[-1] if time_step_index == 0 else horizon[time_step_index - 1]
-            return m.hydrogen_inventory_kwh_h2_lhv[node, t] == (
-                m.hydrogen_inventory_retention * m.hydrogen_inventory_kwh_h2_lhv[node, previous_time_step]
-                + m.charge_efficiency * m.hydrogen_charge_flow[node, t]
-                - (1.0 / m.discharge_efficiency) * m.hydrogen_discharge_flow[node, t]
+            return m.hydrogen_inventory_kwh_h2_lhv[node, s, t] == (
+                m.hydrogen_inventory_retention * m.hydrogen_inventory_kwh_h2_lhv[node, s, previous_time_step]
+                + m.charge_efficiency * m.hydrogen_charge_flow[node, s, t]
+                - (1.0 / m.discharge_efficiency) * m.hydrogen_discharge_flow[node, s, t]
             )
 
-        h2_block.hydrogen_energy_balance = pyo.Constraint(nodes, T, rule=hydrogen_inventory_balance_rule)
+        h2_block.hydrogen_energy_balance = pyo.Constraint(
+            nodes, model.SCENARIOS, T, rule=hydrogen_inventory_balance_rule
+        )
 
         if hasattr(h2_block, "initial_hydrogen_inventory_fraction") and horizon:
             first_time_step = horizon[0]
 
-            def initial_inventory_rule(m, node):
-                return m.hydrogen_inventory_kwh_h2_lhv[node, first_time_step] == (
+            def initial_inventory_rule(m, node, s):
+                return m.hydrogen_inventory_kwh_h2_lhv[node, s, first_time_step] == (
                     m.initial_hydrogen_inventory_fraction * m.total_energy_capacity_kwh_h2_lhv[node]
                 )
 
-            h2_block.initial_hydrogen_inventory = pyo.Constraint(nodes, rule=initial_inventory_rule)
+            h2_block.initial_hydrogen_inventory = pyo.Constraint(
+                nodes, model.SCENARIOS, rule=initial_inventory_rule
+            )
 
         h2_block.hydrogen_source_term = pyo.Expression(
-            nodes, T, rule=lambda m, node, t: m.hydrogen_discharge_flow[node, t]
+            nodes, model.SCENARIOS, T, rule=lambda m, node, s, t: m.hydrogen_discharge_flow[node, s, t]
         )
         h2_block.hydrogen_sink_term = pyo.Expression(
-            nodes, T, rule=lambda m, node, t: m.hydrogen_charge_flow[node, t]
+            nodes, model.SCENARIOS, T, rule=lambda m, node, s, t: m.hydrogen_charge_flow[node, s, t]
         )
         h2_block.electricity_sink_term = pyo.Expression(
             nodes,
+            model.SCENARIOS,
             T,
-            rule=lambda m, node, t: m.compression_kwh_electric_per_kwh_h2_lhv * m.hydrogen_charge_flow[node, t],
+            rule=lambda m, node, s, t: m.compression_kwh_electric_per_kwh_h2_lhv
+            * m.hydrogen_charge_flow[node, s, t],
         )
 
         annualized_capital_if_adopted = None

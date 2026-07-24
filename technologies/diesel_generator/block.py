@@ -17,6 +17,7 @@ from shared.cost_helpers import (
     attach_standard_cost_expressions,
     time_summed_variable_cost,
 )
+from shared.scenario_helpers import series_for_scenario
 
 from .inputs import (
     FORMULATION_DIESEL_BINARY,
@@ -51,17 +52,19 @@ def add_diesel_generator_block(
        - ``model.NODES`` -> node index used by the diesel block
 
     3. Variables (Pyomo ``Var``)
-       - Shared: ``diesel_generation[node, t]`` (continuous nonnegative; **kWh per timestep**,
-         i.e. scaled by ``model.time_step_hours`` so capacity-kW × dt = kWh/period limits are
-         dimensionally consistent across the electricity balance)
+       - Shared: ``diesel_generation[node, scenario, t]`` (continuous nonnegative; **kWh per
+         timestep**, i.e. scaled by ``model.time_step_hours`` so capacity-kW × dt = kWh/period
+         limits are dimensionally consistent across the electricity balance). Scenario-indexed
+         (Stage-2 dispatch): each scenario gets its own generation trajectory, but capacity
+         Vars below stay scenario-independent (Stage-1, shared across scenarios).
        - ``diesel_lp``:
          - ``diesel_capacity_adopted[node]`` (continuous nonnegative, when adoption enabled)
        - ``diesel_binary``:
          - ``diesel_capacity_adopted[node]`` (continuous nonnegative, when adoption enabled)
-         - ``diesel_on[node, t]`` (binary on/off per timestep)
+         - ``diesel_on[node, scenario, t]`` (binary on/off per timestep, per scenario)
        - ``diesel_unit_milp``:
          - ``diesel_units_adopted[node]`` (integer nonnegative, when adoption enabled)
-         - ``diesel_units_on[node, t]`` (integer nonnegative)
+         - ``diesel_units_on[node, scenario, t]`` (integer nonnegative, per scenario)
 
     4. Parameters (Pyomo ``Param``)
        - ``capital_cost_per_kw`` / ``capital_cost_per_unit``
@@ -84,7 +87,7 @@ def add_diesel_generator_block(
        - ``maximum_total_units[node]`` -> bound for discrete unit-count logic
 
     6. Contribution to electricity sources
-       - ``electricity_source_term[node, t]`` -> diesel generation
+       - ``electricity_source_term[node, scenario, t]`` -> diesel generation
 
     7. Contribution to the cost function
        - ``diesel_variable_om_cost`` / ``diesel_fuel_cost`` (per-component sub-expressions)
@@ -122,10 +125,15 @@ def add_diesel_generator_block(
     formulation = resolved.formulation
     allow_adoption = resolved.allow_adoption
 
-    T_list = list(T)
+    scenario_keys = list(data.scenario_keys)
     if formulation == FORMULATION_DIESEL_BINARY:
+        # Big-M must be valid for every scenario's load, not just the base series -- take the
+        # peak across all scenarios (a scenario without its own load override falls back to
+        # the base series via series_for_scenario, so this collapses to today's single-series
+        # peak when there is one implicit scenario). Each scenario's series is resolved once
+        # (not once per timestep) since series_for_scenario doesn't depend on t.
         max_load_by_node = {
-            node: max(float(data.timeseries[node][t]) for t in T_list)
+            node: max(max(series_for_scenario(data, s, node)) for s in scenario_keys)
             for node in nodes
         }
     else:
@@ -187,8 +195,11 @@ def add_diesel_generator_block(
         diesel_block.amortization_factor = pyo.Param(
             initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=False
         )
-        # Electrical output from a diesel generator - Used in all diesel formulations
-        diesel_block.diesel_generation = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
+        # Electrical output from a diesel generator - Used in all diesel formulations.
+        # Scenario-indexed (Stage-2 dispatch): each scenario gets its own generation trajectory.
+        diesel_block.diesel_generation = pyo.Var(
+            nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals
+        )
 
         if formulation in (FORMULATION_DIESEL_LP, FORMULATION_DIESEL_BINARY):
             if allow_adoption:
@@ -204,44 +215,49 @@ def add_diesel_generator_block(
             diesel_block.installed_capacity = pyo.Expression(nodes, rule=installed_capacity_rule)
 
             if formulation == FORMULATION_DIESEL_LP:
-                def generation_limits_rule(m, node, t):
+                def generation_limits_rule(m, node, s, t):
                     # kWh/timestep bound: installed kW * dt_hours.
-                    return m.diesel_generation[node, t] <= (
+                    return m.diesel_generation[node, s, t] <= (
                         m.installed_capacity[node] * model.time_step_hours
                     )
 
-                diesel_block.generation_limits = pyo.Constraint(nodes, T, rule=generation_limits_rule)
+                diesel_block.generation_limits = pyo.Constraint(
+                    nodes, model.SCENARIOS, T, rule=generation_limits_rule
+                )
             else:
-                # Peak load over the horizon (data.timeseries; already in kWh/timestep). Used as M
-                # in diesel_on linearization; dimensionally matches diesel_generation (kWh/timestep).
+                # Peak load across all scenarios (already kWh/timestep). Used as M in diesel_on
+                # linearization; dimensionally matches diesel_generation (kWh/timestep).
                 # If other sinks can draw power beyond contemporaneous load, peak load may under-estimate max diesel output.
                 diesel_block.maximum_load_at_node = pyo.Param(
                     nodes, initialize=max_load_by_node, within=pyo.NonNegativeReals, mutable=False
                 )
-                diesel_block.diesel_on = pyo.Var(nodes, T, within=pyo.Binary)
+                # Scenario-indexed (Stage-2): each scenario has its own commitment schedule.
+                diesel_block.diesel_on = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.Binary)
 
-                def generation_capacity_limit_rule(m, node, t):
-                    return m.diesel_generation[node, t] <= (
+                def generation_capacity_limit_rule(m, node, s, t):
+                    return m.diesel_generation[node, s, t] <= (
                         m.installed_capacity[node] * model.time_step_hours
                     )
 
-                def generation_commitment_big_m_rule(m, node, t):
-                    return m.diesel_generation[node, t] <= m.maximum_load_at_node[node] * m.diesel_on[node, t]
+                def generation_commitment_big_m_rule(m, node, s, t):
+                    return m.diesel_generation[node, s, t] <= (
+                        m.maximum_load_at_node[node] * m.diesel_on[node, s, t]
+                    )
 
-                def generation_min_loading_rule(m, node, t):
-                    return m.diesel_generation[node, t] >= (
+                def generation_min_loading_rule(m, node, s, t):
+                    return m.diesel_generation[node, s, t] >= (
                         m.minimum_loading_fraction * m.installed_capacity[node] * model.time_step_hours
-                        - m.maximum_load_at_node[node] * (1 - m.diesel_on[node, t])
+                        - m.maximum_load_at_node[node] * (1 - m.diesel_on[node, s, t])
                     )
 
                 diesel_block.generation_capacity_limit = pyo.Constraint(
-                    nodes, T, rule=generation_capacity_limit_rule
+                    nodes, model.SCENARIOS, T, rule=generation_capacity_limit_rule
                 )
                 diesel_block.generation_commitment_big_m = pyo.Constraint(
-                    nodes, T, rule=generation_commitment_big_m_rule
+                    nodes, model.SCENARIOS, T, rule=generation_commitment_big_m_rule
                 )
                 diesel_block.generation_min_loading = pyo.Constraint(
-                    nodes, T, rule=generation_min_loading_rule
+                    nodes, model.SCENARIOS, T, rule=generation_min_loading_rule
                 )
 
             annualized_capital_if_adopted = None
@@ -279,31 +295,36 @@ def add_diesel_generator_block(
             diesel_block.maximum_total_units = pyo.Expression(
                 nodes, rule=lambda m, node: m.existing_unit_count[node] + m.unit_adoption_limit[node]
             )
-            diesel_block.diesel_units_on = pyo.Var(nodes, T, within=pyo.NonNegativeIntegers)
+            # Scenario-indexed (Stage-2): each scenario has its own unit-commitment schedule.
+            diesel_block.diesel_units_on = pyo.Var(
+                nodes, model.SCENARIOS, T, within=pyo.NonNegativeIntegers
+            )
 
-            def units_on_limit_rule(m, node, t):
-                return m.diesel_units_on[node, t] <= m.installed_unit_count[node]
+            def units_on_limit_rule(m, node, s, t):
+                return m.diesel_units_on[node, s, t] <= m.installed_unit_count[node]
 
-            def generation_upper_by_units_rule(m, node, t):
+            def generation_upper_by_units_rule(m, node, s, t):
                 # kWh/timestep = unit_kw * units_on * dt_hours
-                return m.diesel_generation[node, t] <= (
-                    m.unit_capacity_kw * m.diesel_units_on[node, t] * model.time_step_hours
+                return m.diesel_generation[node, s, t] <= (
+                    m.unit_capacity_kw * m.diesel_units_on[node, s, t] * model.time_step_hours
                 )
 
-            def generation_lower_by_units_rule(m, node, t):
-                return m.diesel_generation[node, t] >= (
+            def generation_lower_by_units_rule(m, node, s, t):
+                return m.diesel_generation[node, s, t] >= (
                     m.minimum_loading_fraction
                     * m.unit_capacity_kw
-                    * m.diesel_units_on[node, t]
+                    * m.diesel_units_on[node, s, t]
                     * model.time_step_hours
                 )
 
-            diesel_block.units_on_limit = pyo.Constraint(nodes, T, rule=units_on_limit_rule)
+            diesel_block.units_on_limit = pyo.Constraint(
+                nodes, model.SCENARIOS, T, rule=units_on_limit_rule
+            )
             diesel_block.generation_upper_by_units = pyo.Constraint(
-                nodes, T, rule=generation_upper_by_units_rule
+                nodes, model.SCENARIOS, T, rule=generation_upper_by_units_rule
             )
             diesel_block.generation_lower_by_units = pyo.Constraint(
-                nodes, T, rule=generation_lower_by_units_rule
+                nodes, model.SCENARIOS, T, rule=generation_lower_by_units_rule
             )
 
             annualized_capital_if_adopted = None
@@ -335,12 +356,16 @@ def add_diesel_generator_block(
             flow_var=diesel_block.diesel_generation,
             nodes=nodes,
             time_set=T,
+            scenarios=model.SCENARIOS,
+            scenario_probability=model.scenario_probability,
         )
         diesel_block.diesel_fuel_cost = time_summed_variable_cost(
             cost_per_unit=diesel_block.fuel_cost_per_kwh_diesel,
             flow_var=diesel_block.diesel_generation,
             nodes=nodes,
             time_set=T,
+            scenarios=model.SCENARIOS,
+            scenario_probability=model.scenario_probability,
             efficiency_divisor=diesel_block.electric_efficiency,
         )
         variable_operating_cost = pyo.Expression(
@@ -357,7 +382,7 @@ def add_diesel_generator_block(
         )
 
         diesel_block.electricity_source_term = pyo.Expression(
-            nodes, T, rule=lambda m, node, t: m.diesel_generation[node, t]
+            nodes, model.SCENARIOS, T, rule=lambda m, node, s, t: m.diesel_generation[node, s, t]
         )
 
     model.diesel_generator = pyo.Block(rule=block_rule)

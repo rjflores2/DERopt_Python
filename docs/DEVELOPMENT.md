@@ -39,13 +39,13 @@ Unless `DEROPT_QUIET=1`, the playground prints **`electricity_load_keys`** and *
 
 ## Data flow
 
-1. **`CaseConfig`** (`config/case_config.py`, built in `config/cases/*.py`): paths for load and optional solar, optional `technology_parameters`, `financials`, `time_subset`, **`utility_mode`** (`priced_grid` | `free_grid` | `islanded`), and utility fields (single-tariff **or** `utility_tariffs` bundle).
+1. **`CaseConfig`** (`config/case_config.py`, built in `config/cases/*.py`): paths for load and optional solar, optional `technology_parameters`, `financials`, `time_subset`, **`utility_mode`** (`priced_grid` | `free_grid` | `islanded`), utility fields (single-tariff **or** `utility_tariffs` bundle), and optional **`scenarios`** (two-stage stochastic; a list of `ScenarioConfig`, each with a `probability` and optional per-field overrides — `None` means "no scenarios configured", equivalent to one implicit scenario at probability 1.0).
 
 2. **`build_run_data`** (`run/build_run_data.py`):  
-   `load_energy_load` → optional resource loaders → **`_validate_utility_mode_config`** (paths vs. mode; multi-tariff conflicts; each `UtilityTariffConfig` must have a source when `priced_grid`) → resolve utility(ies) into **`import_prices`** / **`import_prices_by_node`**, **`utility_rate`** / **`utility_rate_by_node`**, **`node_utility_tariff_key`** (for **`islanded`**, the per-node maps stay **`None`**) → optional **`apply_time_subset`**.
+   `load_energy_load` → optional resource loaders → **`_validate_utility_mode_config`** (paths vs. mode; multi-tariff conflicts; each `UtilityTariffConfig` must have a source when `priced_grid`) → resolve utility(ies) into **`import_prices`** / **`import_prices_by_node`**, **`utility_rate`** / **`utility_rate_by_node`**, **`node_utility_tariff_key`** (for **`islanded`**, the per-node maps stay **`None`**) → **`_load_scenarios`** (validates and resolves `scenarios` into `data.scenario_keys`/`scenario_probability`/`scenario_*` sparse overrides) → optional **`apply_time_subset`**.
 
 3. **`build_model`** (`model/core.py`):  
-   Validates series lengths, attaches **`model.import_prices_by_node`** and **`model.utility_rate_by_node`**, iterates **`technologies.REGISTRY`**, then calls **`utilities.electricity_import_export.register`**. Builds electricity and hydrogen balances plus objective from block contributions.
+   Validates series lengths, builds **`model.SCENARIOS`** and **`model.scenario_probability`** (two-stage stochastic; defaults to one implicit scenario), attaches **`model.import_prices_by_node`** and **`model.utility_rate_by_node`**, iterates **`technologies.REGISTRY`**, then calls **`utilities.electricity_import_export.register`**. Builds electricity and hydrogen balances plus objective from block contributions. Every technology block's balance-contract terms (`electricity_source_term`, etc.) must be indexed **`[node, scenario, t]`** — capacity/adoption ("Stage-1") variables stay scenario-independent; dispatch ("Stage-2") variables carry the scenario dimension. **Not every registered technology has been migrated to this shape yet** — see `docs/PLAN.md`.
 
 ### `technology_parameters` and the registry loop
 

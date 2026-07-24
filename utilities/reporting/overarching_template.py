@@ -6,7 +6,9 @@ This template is the **stable cross-run shape** for comparing studies. It is bui
     (``objective_contribution``, ``cost_non_optimizing_annual``) and registered
     scalar ``pyo.Expression`` components on each top-level ``pyo.Block``.
  2. A **generic timeseries walk** that sums ``electricity_source_term`` /
-    ``electricity_sink_term`` over nodes for each block exposing them.
+    ``electricity_sink_term`` over nodes for each block exposing them, probability-weighted
+    over ``model.SCENARIOS`` to an expected-value series (two-stage stochastic; this walk
+    reports the expected value across scenarios, not a full per-scenario breakdown).
  3. **Per-technology plugin hooks** discovered via ``blk._technology_module``
     (set by ``model.core``). Each module may define any of:
        - ``collect_block_report(model, block, data, ctx) -> dict``
@@ -70,64 +72,87 @@ def _load_reporting_hooks(technology_module: str) -> dict[str, Callable]:
     return hooks
 
 
-def _sum_source_kwh(blk: pyo.Block, T: list, NODES: list) -> float:
+def _sum_source_kwh(
+    blk: pyo.Block, T: list, NODES: list, SCENARIOS: list, scenario_probability
+) -> float:
+    """Probability-weighted expected total over the horizon (see module docstring: this is
+    the backward-compatible expected-value summary, not a per-scenario breakdown)."""
     if not hasattr(blk, "electricity_source_term"):
         return 0.0
     total = 0.0
     for n in NODES:
-        for t in T:
-            v = pyo.value(blk.electricity_source_term[n, t], exception=False)
-            if v is not None:
-                total += float(v)
+        for s in SCENARIOS:
+            prob = float(pyo.value(scenario_probability[s]))
+            for t in T:
+                v = pyo.value(blk.electricity_source_term[n, s, t], exception=False)
+                if v is not None:
+                    total += prob * float(v)
     return total
 
 
-def _sum_sink_kwh(blk: pyo.Block, T: list, NODES: list) -> float:
+def _sum_sink_kwh(
+    blk: pyo.Block, T: list, NODES: list, SCENARIOS: list, scenario_probability
+) -> float:
     if not hasattr(blk, "electricity_sink_term"):
         return 0.0
     total = 0.0
     for n in NODES:
-        for t in T:
-            v = pyo.value(blk.electricity_sink_term[n, t], exception=False)
-            if v is not None:
-                total += float(v)
+        for s in SCENARIOS:
+            prob = float(pyo.value(scenario_probability[s]))
+            for t in T:
+                v = pyo.value(blk.electricity_sink_term[n, s, t], exception=False)
+                if v is not None:
+                    total += prob * float(v)
     return total
 
 
-def _source_timeseries(blk: pyo.Block, T: list, NODES: list) -> list[float] | None:
+def _source_timeseries(
+    blk: pyo.Block, T: list, NODES: list, SCENARIOS: list, scenario_probability
+) -> list[float] | None:
     if not hasattr(blk, "electricity_source_term"):
         return None
+    probs = {s: float(pyo.value(scenario_probability[s])) for s in SCENARIOS}
     series = [0.0] * len(T)
     for idx, t in enumerate(T):
-        s = 0.0
+        total = 0.0
         for n in NODES:
-            v = pyo.value(blk.electricity_source_term[n, t], exception=False)
-            if v is not None:
-                s += float(v)
-        series[idx] = s
+            for s in SCENARIOS:
+                v = pyo.value(blk.electricity_source_term[n, s, t], exception=False)
+                if v is not None:
+                    total += probs[s] * float(v)
+        series[idx] = total
     return series
 
 
-def _sink_timeseries(blk: pyo.Block, T: list, NODES: list) -> list[float] | None:
+def _sink_timeseries(
+    blk: pyo.Block, T: list, NODES: list, SCENARIOS: list, scenario_probability
+) -> list[float] | None:
     if not hasattr(blk, "electricity_sink_term"):
         return None
+    probs = {s: float(pyo.value(scenario_probability[s])) for s in SCENARIOS}
     series = [0.0] * len(T)
     for idx, t in enumerate(T):
-        s = 0.0
+        total = 0.0
         for n in NODES:
-            v = pyo.value(blk.electricity_sink_term[n, t], exception=False)
-            if v is not None:
-                s += float(v)
-        series[idx] = s
+            for s in SCENARIOS:
+                v = pyo.value(blk.electricity_sink_term[n, s, t], exception=False)
+                if v is not None:
+                    total += probs[s] * float(v)
+        series[idx] = total
     return series
 
 
-def _load_timeseries(model: pyo.Block, T: list, NODES: list) -> list[float]:
+def _load_timeseries(
+    model: pyo.Block, T: list, NODES: list, SCENARIOS: list, scenario_probability
+) -> list[float]:
     series = [0.0] * len(T)
     if not hasattr(model, "electricity_load"):
         return series
+    probs = {s: float(pyo.value(scenario_probability[s])) for s in SCENARIOS}
     for idx, t in enumerate(T):
-        series[idx] = float(sum(pyo.value(model.electricity_load[n, t]) for n in NODES))
+        series[idx] = float(
+            sum(probs[s] * pyo.value(model.electricity_load[n, s, t]) for n in NODES for s in SCENARIOS)
+        )
     return series
 
 
@@ -168,12 +193,16 @@ def build_overarching_report(
     """
     T = list(model.T)
     NODES = list(model.NODES)
+    SCENARIOS = list(model.SCENARIOS)
+    scenario_probability = model.scenario_probability
     n_time = len(T)
     dt_hours = float(data.static.get("time_step_hours") or 1.0)
 
     ctx: dict[str, Any] = {
         "T": T,
         "NODES": NODES,
+        "SCENARIOS": SCENARIOS,
+        "scenario_probability": scenario_probability,
         "dt_hours": dt_hours,
         "emission_factors": emission_factors,
     }
@@ -213,22 +242,22 @@ def build_overarching_report(
         if cost_row:
             by_block_costs[block_name] = cost_row
 
-        # Energy totals (aggregate kWh over horizon).
+        # Energy totals (probability-weighted expected kWh over horizon).
         erow: dict[str, float] = {}
-        sk = _sum_source_kwh(blk, T, NODES)
+        sk = _sum_source_kwh(blk, T, NODES, SCENARIOS, scenario_probability)
         if sk > 0:
             erow["electricity_source_kwh"] = sk
-        sink = _sum_sink_kwh(blk, T, NODES)
+        sink = _sum_sink_kwh(blk, T, NODES, SCENARIOS, scenario_probability)
         if sink > 0:
             erow["electricity_sink_kwh"] = sink
         if erow:
             by_block_energy[block_name] = erow
 
-        # Per-block source / sink timeseries (summed over nodes).
-        src_ts = _source_timeseries(blk, T, NODES)
+        # Per-block source / sink timeseries (probability-weighted expected value, summed over nodes).
+        src_ts = _source_timeseries(blk, T, NODES, SCENARIOS, scenario_probability)
         if src_ts is not None and any(src_ts):
             by_block_source_ts[block_name] = src_ts
-        snk_ts = _sink_timeseries(blk, T, NODES)
+        snk_ts = _sink_timeseries(blk, T, NODES, SCENARIOS, scenario_probability)
         if snk_ts is not None and any(snk_ts):
             by_block_sink_ts[block_name] = snk_ts
 
@@ -259,7 +288,7 @@ def build_overarching_report(
                 by_block_emissions[block_name] = out_em
 
     # --- Aggregates for energy_mix_kwh ----------------------------------------
-    load_ts = _load_timeseries(model, T, NODES)
+    load_ts = _load_timeseries(model, T, NODES, SCENARIOS, scenario_probability)
     load_total = float(sum(load_ts))
     grid_total = float(sum(by_block_source_ts.get("utility", [0.0] * n_time)))
 

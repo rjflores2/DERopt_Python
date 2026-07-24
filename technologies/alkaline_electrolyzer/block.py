@@ -26,6 +26,7 @@ from shared.cost_helpers import (
     attach_standard_cost_expressions,
     time_summed_variable_cost,
 )
+from shared.scenario_helpers import series_for_scenario
 
 from .inputs import (
     FORMULATION_ALKALINE_ELECTROLYZER_BINARY,
@@ -96,13 +97,17 @@ def add_alkaline_electrolyzer_block(
     )
     formulation = resolved.formulation
     allow_adoption = resolved.allow_adoption
-    T_list = list(T)
 
+    scenario_keys = list(data.scenario_keys)
     max_load_kwh_by_node: dict[str, float] = {}
     big_m_elec_by_node: dict[str, float] = {}
     if formulation == FORMULATION_ALKALINE_ELECTROLYZER_BINARY:
+        # Big-M must be valid for every scenario's load, not just the base series. Each
+        # scenario's series is resolved once (not once per timestep) since
+        # series_for_scenario doesn't depend on t.
         max_load_kwh_by_node = {
-            node: max(float(data.timeseries[node][t]) for t in T_list) for node in nodes
+            node: max(max(series_for_scenario(data, s, node)) for s in scenario_keys)
+            for node in nodes
         }
         mult = resolved.electrolyzer_binary_big_m_load_multiplier
         big_m_elec_by_node = {node: max_load_kwh_by_node[node] * mult for node in nodes}
@@ -167,7 +172,10 @@ def add_alkaline_electrolyzer_block(
             mutable=False,
         )
 
-        ele_block.electricity_consumption_kwh_electric = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
+        # Scenario-indexed (Stage-2 dispatch): each scenario gets its own consumption trajectory.
+        ele_block.electricity_consumption_kwh_electric = pyo.Var(
+            nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals
+        )
 
         if formulation in (FORMULATION_ALKALINE_ELECTROLYZER_LP, FORMULATION_ALKALINE_ELECTROLYZER_BINARY):
             if allow_adoption:
@@ -194,12 +202,14 @@ def add_alkaline_electrolyzer_block(
                 nodes, rule=max_energy_per_timestep_rule
             )
 
-            def consumption_capacity_rule(m, node, t):
-                return m.electricity_consumption_kwh_electric[node, t] <= m.max_electricity_kwh_electric_per_timestep[
-                    node
-                ]
+            def consumption_capacity_rule(m, node, s, t):
+                return m.electricity_consumption_kwh_electric[node, s, t] <= (
+                    m.max_electricity_kwh_electric_per_timestep[node]
+                )
 
-            ele_block.consumption_capacity_limit = pyo.Constraint(nodes, T, rule=consumption_capacity_rule)
+            ele_block.consumption_capacity_limit = pyo.Constraint(
+                nodes, model.SCENARIOS, T, rule=consumption_capacity_rule
+            )
 
             if formulation == FORMULATION_ALKALINE_ELECTROLYZER_BINARY:
                 ele_block.maximum_load_kwh_per_timestep = pyo.Param(
@@ -208,21 +218,26 @@ def add_alkaline_electrolyzer_block(
                 ele_block.big_m_electricity_kwh_per_timestep = pyo.Param(
                     nodes, initialize=big_m_elec_by_node, within=pyo.NonNegativeReals, mutable=False
                 )
-                ele_block.electrolyzer_on = pyo.Var(nodes, T, within=pyo.Binary)
+                # Scenario-indexed (Stage-2): each scenario has its own commitment schedule.
+                ele_block.electrolyzer_on = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.Binary)
 
-                def consumption_big_m_rule(m, node, t):
-                    return m.electricity_consumption_kwh_electric[node, t] <= m.big_m_electricity_kwh_per_timestep[
-                        node
-                    ] * m.electrolyzer_on[node, t]
-
-                def consumption_min_load_rule(m, node, t):
-                    return m.electricity_consumption_kwh_electric[node, t] >= (
-                        m.minimum_loading_fraction * m.max_electricity_kwh_electric_per_timestep[node]
-                        - m.big_m_electricity_kwh_per_timestep[node] * (1 - m.electrolyzer_on[node, t])
+                def consumption_big_m_rule(m, node, s, t):
+                    return m.electricity_consumption_kwh_electric[node, s, t] <= (
+                        m.big_m_electricity_kwh_per_timestep[node] * m.electrolyzer_on[node, s, t]
                     )
 
-                ele_block.consumption_commitment_big_m = pyo.Constraint(nodes, T, rule=consumption_big_m_rule)
-                ele_block.consumption_min_loading = pyo.Constraint(nodes, T, rule=consumption_min_load_rule)
+                def consumption_min_load_rule(m, node, s, t):
+                    return m.electricity_consumption_kwh_electric[node, s, t] >= (
+                        m.minimum_loading_fraction * m.max_electricity_kwh_electric_per_timestep[node]
+                        - m.big_m_electricity_kwh_per_timestep[node] * (1 - m.electrolyzer_on[node, s, t])
+                    )
+
+                ele_block.consumption_commitment_big_m = pyo.Constraint(
+                    nodes, model.SCENARIOS, T, rule=consumption_big_m_rule
+                )
+                ele_block.consumption_min_loading = pyo.Constraint(
+                    nodes, model.SCENARIOS, T, rule=consumption_min_load_rule
+                )
 
             annualized_capital_if_adopted = None
             fixed_om_adopted_if_adopted = None
@@ -266,24 +281,29 @@ def add_alkaline_electrolyzer_block(
                 nodes,
                 rule=lambda m, node: m.existing_unit_count[node] + m.unit_adoption_limit[node],
             )
-            ele_block.units_on = pyo.Var(nodes, T, within=pyo.NonNegativeIntegers)
+            # Scenario-indexed (Stage-2): each scenario has its own unit-commitment schedule.
+            ele_block.units_on = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.NonNegativeIntegers)
 
-            def units_on_limit_rule(m, node, t):
-                return m.units_on[node, t] <= m.installed_unit_count[node]
+            def units_on_limit_rule(m, node, s, t):
+                return m.units_on[node, s, t] <= m.installed_unit_count[node]
 
-            def consumption_upper_units_rule(m, node, t):
+            def consumption_upper_units_rule(m, node, s, t):
                 cap_e = m.unit_capacity_kw * model.time_step_hours
-                return m.electricity_consumption_kwh_electric[node, t] <= cap_e * m.units_on[node, t]
+                return m.electricity_consumption_kwh_electric[node, s, t] <= cap_e * m.units_on[node, s, t]
 
-            def consumption_lower_units_rule(m, node, t):
+            def consumption_lower_units_rule(m, node, s, t):
                 cap_e = m.unit_capacity_kw * model.time_step_hours
-                return m.electricity_consumption_kwh_electric[node, t] >= (
-                    m.minimum_loading_fraction * cap_e * m.units_on[node, t]
+                return m.electricity_consumption_kwh_electric[node, s, t] >= (
+                    m.minimum_loading_fraction * cap_e * m.units_on[node, s, t]
                 )
 
-            ele_block.units_on_limit = pyo.Constraint(nodes, T, rule=units_on_limit_rule)
-            ele_block.consumption_upper_by_units = pyo.Constraint(nodes, T, rule=consumption_upper_units_rule)
-            ele_block.consumption_lower_by_units = pyo.Constraint(nodes, T, rule=consumption_lower_units_rule)
+            ele_block.units_on_limit = pyo.Constraint(nodes, model.SCENARIOS, T, rule=units_on_limit_rule)
+            ele_block.consumption_upper_by_units = pyo.Constraint(
+                nodes, model.SCENARIOS, T, rule=consumption_upper_units_rule
+            )
+            ele_block.consumption_lower_by_units = pyo.Constraint(
+                nodes, model.SCENARIOS, T, rule=consumption_lower_units_rule
+            )
 
             annualized_capital_if_adopted = None
             fixed_om_adopted_if_adopted = None
@@ -308,9 +328,10 @@ def add_alkaline_electrolyzer_block(
 
         ele_block.hydrogen_production_kwh_h2_lhv = pyo.Expression(
             nodes,
+            model.SCENARIOS,
             T,
-            rule=lambda m, node, t: m.electric_to_hydrogen_lhv_efficiency
-            * m.electricity_consumption_kwh_electric[node, t],
+            rule=lambda m, node, s, t: m.electric_to_hydrogen_lhv_efficiency
+            * m.electricity_consumption_kwh_electric[node, s, t],
         )
 
         variable_operating_cost = time_summed_variable_cost(
@@ -318,6 +339,8 @@ def add_alkaline_electrolyzer_block(
             flow_var=ele_block.electricity_consumption_kwh_electric,
             nodes=nodes,
             time_set=T,
+            scenarios=model.SCENARIOS,
+            scenario_probability=model.scenario_probability,
         )
 
         attach_standard_cost_expressions(
@@ -330,10 +353,16 @@ def add_alkaline_electrolyzer_block(
         )
 
         ele_block.electricity_sink_term = pyo.Expression(
-            nodes, T, rule=lambda m, node, t: m.electricity_consumption_kwh_electric[node, t]
+            nodes,
+            model.SCENARIOS,
+            T,
+            rule=lambda m, node, s, t: m.electricity_consumption_kwh_electric[node, s, t],
         )
         ele_block.hydrogen_source_term = pyo.Expression(
-            nodes, T, rule=lambda m, node, t: m.hydrogen_production_kwh_h2_lhv[node, t]
+            nodes,
+            model.SCENARIOS,
+            T,
+            rule=lambda m, node, s, t: m.hydrogen_production_kwh_h2_lhv[node, s, t],
         )
 
     model.alkaline_electrolyzer = pyo.Block(rule=block_rule)

@@ -11,6 +11,7 @@ from shared.cost_helpers import (
     annualized_fixed_cost_by_node_category,
     attach_standard_cost_expressions,
 )
+from shared.scenario_helpers import series_for_scenario
 
 from .inputs import (
     FORMULATION_HYDROKINETIC_LP,
@@ -32,11 +33,17 @@ def add_hydrokinetic_block(
     period). Scaling to swept area uses ``data.static['hydrokinetic_reference_swept_area_m2']`` and
     ``data.static['hydrokinetic_reference_kw']`` (see ``technologies.hydrokinetic.inputs``).
 
-    LP (``hydrokinetic_lp``): continuous adopted swept area and kW; generation <= area * yield_m2[t]
-    and <= kW * dt_hours; ``kW <= density * total_swept_area``.
+    LP (``hydrokinetic_lp``): continuous adopted swept area and kW (Stage-1, scenario-independent);
+    generation (Stage-2, per scenario) <= area * yield_m2[scenario, t] and <= kW * dt_hours;
+    ``kW <= density * total_swept_area``.
 
-    MILP (``hydrokinetic_unit_milp``): integer units per (node, profile); generation <= units *
-    unit_swept_area * yield_m2[t] and <= units * unit_kw * dt_hours.
+    MILP (``hydrokinetic_unit_milp``): integer units per (node, profile) (Stage-1); generation
+    (Stage-2, per scenario) <= units * unit_swept_area * yield_m2[scenario, t] and <= units *
+    unit_kw * dt_hours.
+
+    Resource yield is resolved per scenario -- a scenario without its own hydrokinetic
+    override falls back to the base series for every scenario (see
+    ``shared.scenario_helpers.series_for_scenario``).
     """
     T = model.T
     nodes = list(model.NODES)
@@ -81,21 +88,46 @@ def add_hydrokinetic_block(
     formulation = resolved.formulation
     allow_adoption = resolved.allow_adoption
 
+    # Scenario-aware resource yield: resolve_hydrokinetic_block_inputs's own
+    # yield_kwh_per_m2_init is base-series-only, so recompute it here per scenario using
+    # scale = reference_kw / reference_swept_area_m2 (a scenario without its own
+    # hydrokinetic override falls back to the base series for every scenario -- see
+    # shared.scenario_helpers.series_for_scenario). A scenario that loaded its OWN
+    # hydrokinetic_path may have normalized that series against its own reference_kw/
+    # reference_swept_area_m2 (different device than the base case's); using the base
+    # case's scale on that series would silently produce the wrong yield, so this pulls
+    # the matching per-scenario reference pair when one was recorded at load time (see
+    # DataContainer.scenario_hydrokinetic_reference_kw/_swept_area_m2).
+    scenario_keys = list(data.scenario_keys)
+    yield_kwh_per_m2_init_scenario: dict[tuple[str, str, int], float] = {}
+    for p in profiles:
+        for s in scenario_keys:
+            series = series_for_scenario(data, s, p)
+            if len(series) != n_time:
+                raise ValueError(
+                    f"hydrokinetic: scenario {s!r} timeseries[{p!r}] length {len(series)} != {n_time}"
+                )
+            scenario_ref_kw = data.scenario_hydrokinetic_reference_kw.get(s, ref_kw)
+            scenario_ref_area = data.scenario_hydrokinetic_reference_swept_area_m2.get(s, float(ref_area))
+            scenario_scale = scenario_ref_kw / scenario_ref_area
+            for t in T_list:
+                yield_kwh_per_m2_init_scenario[(p, s, t)] = float(series[t]) * scenario_scale
+
     def block_rule(hk_block):
         hk_block.HKT = pyo.Set(initialize=profiles, ordered=True)
 
         hk_block.yield_kwh_per_m2 = pyo.Param(
             hk_block.HKT,
+            model.SCENARIOS,
             T,
-            initialize={
-                (p, t): resolved.yield_kwh_per_m2_init[(p, t)]
-                for p in profiles
-                for t in T_list
-            },
+            initialize=yield_kwh_per_m2_init_scenario,
             within=pyo.NonNegativeReals,
             mutable=False,
         )
-        hk_block.hkt_generation = pyo.Var(nodes, hk_block.HKT, T, within=pyo.NonNegativeReals)
+        # Scenario-indexed (Stage-2 dispatch): each scenario gets its own generation trajectory.
+        hk_block.hkt_generation = pyo.Var(
+            nodes, hk_block.HKT, model.SCENARIOS, T, within=pyo.NonNegativeReals
+        )
 
         # --- Per-profile scalar params (Pyomo indexed by set) ---
         hk_block.capital_cost_per_kw = pyo.Param(
@@ -219,17 +251,19 @@ def add_hydrokinetic_block(
             hk_block.total_swept_area_m2 = pyo.Expression(nodes, hk_block.HKT, rule=total_swept_area_expr)
             hk_block.total_capacity_kw = pyo.Expression(nodes, hk_block.HKT, rule=total_kw_expr)
 
-            def gen_resource_limit(m, node, p, t):
-                return m.hkt_generation[node, p, t] <= m.total_swept_area_m2[node, p] * m.yield_kwh_per_m2[p, t]
+            def gen_resource_limit(m, node, p, s, t):
+                return m.hkt_generation[node, p, s, t] <= (
+                    m.total_swept_area_m2[node, p] * m.yield_kwh_per_m2[p, s, t]
+                )
 
-            def gen_nameplate_limit(m, node, p, t):
-                return m.hkt_generation[node, p, t] <= m.total_capacity_kw[node, p] * model.time_step_hours
+            def gen_nameplate_limit(m, node, p, s, t):
+                return m.hkt_generation[node, p, s, t] <= m.total_capacity_kw[node, p] * model.time_step_hours
 
             hk_block.generation_resource_limit = pyo.Constraint(
-                nodes, hk_block.HKT, T, rule=gen_resource_limit
+                nodes, hk_block.HKT, model.SCENARIOS, T, rule=gen_resource_limit
             )
             hk_block.generation_nameplate_limit = pyo.Constraint(
-                nodes, hk_block.HKT, T, rule=gen_nameplate_limit
+                nodes, hk_block.HKT, model.SCENARIOS, T, rule=gen_nameplate_limit
             )
 
             def power_density_cap_lp(m, node, p):
@@ -279,13 +313,17 @@ def add_hydrokinetic_block(
                     expr=hk_block.hkt_fixed_om_kw + hk_block.hkt_fixed_om_m2
                 )
 
-            # Variable O&M is keyed by [node, profile, t] (per-profile rate); kept inline
-            # because helper supports [node, t] flow only.
+            # Variable O&M is keyed by [node, profile, scenario, t] (per-profile rate); kept
+            # inline because the shared helper only supports a plain [node, t] flow shape.
+            # Probability-weighted across scenarios (Stage-2 recourse cost).
             variable_operating_cost = pyo.Expression(
                 expr=sum(
-                    hk_block.variable_om_per_kwh[p] * hk_block.hkt_generation[node, p, t]
+                    model.scenario_probability[s]
+                    * hk_block.variable_om_per_kwh[p]
+                    * hk_block.hkt_generation[node, p, s, t]
                     for p in hk_block.HKT
                     for node in nodes
+                    for s in model.SCENARIOS
                     for t in T
                 )
             )
@@ -329,17 +367,19 @@ def add_hydrokinetic_block(
             hk_block.total_swept_area_m2 = pyo.Expression(nodes, hk_block.HKT, rule=total_swept_from_units)
             hk_block.total_capacity_kw = pyo.Expression(nodes, hk_block.HKT, rule=total_kw_from_units)
 
-            def gen_resource_limit_milp(m, node, p, t):
-                return m.hkt_generation[node, p, t] <= m.total_swept_area_m2[node, p] * m.yield_kwh_per_m2[p, t]
+            def gen_resource_limit_milp(m, node, p, s, t):
+                return m.hkt_generation[node, p, s, t] <= (
+                    m.total_swept_area_m2[node, p] * m.yield_kwh_per_m2[p, s, t]
+                )
 
-            def gen_nameplate_limit_milp(m, node, p, t):
-                return m.hkt_generation[node, p, t] <= m.total_capacity_kw[node, p] * model.time_step_hours
+            def gen_nameplate_limit_milp(m, node, p, s, t):
+                return m.hkt_generation[node, p, s, t] <= m.total_capacity_kw[node, p] * model.time_step_hours
 
             hk_block.generation_resource_limit = pyo.Constraint(
-                nodes, hk_block.HKT, T, rule=gen_resource_limit_milp
+                nodes, hk_block.HKT, model.SCENARIOS, T, rule=gen_resource_limit_milp
             )
             hk_block.generation_nameplate_limit = pyo.Constraint(
-                nodes, hk_block.HKT, T, rule=gen_nameplate_limit_milp
+                nodes, hk_block.HKT, model.SCENARIOS, T, rule=gen_nameplate_limit_milp
             )
 
             def units_cap_milp(m, node, p):
@@ -367,9 +407,12 @@ def add_hydrokinetic_block(
 
             variable_operating_cost = pyo.Expression(
                 expr=sum(
-                    hk_block.variable_om_per_kwh[p] * hk_block.hkt_generation[node, p, t]
+                    model.scenario_probability[s]
+                    * hk_block.variable_om_per_kwh[p]
+                    * hk_block.hkt_generation[node, p, s, t]
                     for p in hk_block.HKT
                     for node in nodes
+                    for s in model.SCENARIOS
                     for t in T
                 )
             )
@@ -392,8 +435,9 @@ def add_hydrokinetic_block(
 
         hk_block.electricity_source_term = pyo.Expression(
             nodes,
+            model.SCENARIOS,
             T,
-            rule=lambda m, node, t: sum(m.hkt_generation[node, p, t] for p in m.HKT),
+            rule=lambda m, node, s, t: sum(m.hkt_generation[node, p, s, t] for p in m.HKT),
         )
 
     model.hydrokinetic = pyo.Block(rule=block_rule)

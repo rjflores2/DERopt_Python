@@ -106,6 +106,9 @@ class CaseConfig:
     utility_tariffs: list["UtilityTariffConfig"] | None = None
     # Optional overrides: node key -> tariff_key. Only specify exceptions from the default.
     node_utility_tariff: dict[str, str] | None = None
+    # Optional two-stage stochastic scenarios (e.g. wet/typical/dry hydro years). None (default)
+    # means today's deterministic behavior: a single implicit scenario at probability 1.0.
+    scenarios: list["ScenarioConfig"] | None = None
 
 
 @dataclass(slots=True)
@@ -123,6 +126,33 @@ class UtilityTariffConfig:
     utility_rate_item_index: int | None = None
     energy_price_path: Path | None = None
     energy_price_column: str | None = None
+
+
+@dataclass(slots=True)
+class ScenarioConfig:
+    """One two-stage-stochastic scenario's identity, probability, and input overrides.
+
+    Each override field left ``None`` means this scenario does not vary that input — it
+    uses the case's base/default value. Per-field, this is all-or-nothing across scenarios:
+    either every scenario in a case sets a given override field, or none do (validated in
+    ``run.build_run_data``); partial coverage is rejected fail-fast rather than silently
+    falling back for only some scenarios.
+    """
+
+    scenario_key: str
+    # None is only valid when this is the sole entry in CaseConfig.scenarios; it is then
+    # forced to 1.0 (not user-settable). Required, and validated (>0, sums to 1.0 within
+    # 1e-6 across all scenarios) when CaseConfig.scenarios has more than one entry.
+    probability: float | None = None
+    energy_load: EnergyLoadFileConfig | None = None
+    solar_path: Path | None = None
+    wind_path: Path | None = None
+    hydrokinetic_path: Path | None = None
+    hydrokinetic_reference_kw: float | None = None
+    hydrokinetic_datetime_column: str | None = None
+    hydrokinetic_reference_swept_area_m2: float | None = None
+    utility_tariffs: list[UtilityTariffConfig] | None = None
+    node_utility_tariff: dict[str, str] | None = None
 
 
 def discover_load_file(folder: Path) -> Path:

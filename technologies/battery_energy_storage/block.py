@@ -9,9 +9,12 @@ Battery is modeled per node and per time step with:
 - SOC kept between configurable fractions of total capacity (existing + adopted) at each node.
 
 The block contributes to the system electricity balance via:
-- electricity_source_term[node, t] (discharging adds to sources),
-- electricity_sink_term[node, t]  (charging adds to sinks),
-so it plugs directly into the electricity balance built in model.core.
+- electricity_source_term[node, scenario, t] (discharging adds to sources),
+- electricity_sink_term[node, scenario, t]  (charging adds to sinks),
+so it plugs directly into the electricity balance built in model.core. State of charge is
+scenario-indexed (Stage-2): each scenario gets its own independent SOC trajectory, including
+its own cyclic wraparound (first timestep's predecessor is the last timestep of that same
+scenario's horizon) -- energy capacity itself (Stage-1) stays scenario-independent.
 """
 
 from __future__ import annotations
@@ -53,11 +56,11 @@ def add_battery_energy_storage_block(
        - ``model.NODES`` -> node index used by the Battery block
 
     3. Variables (Pyomo ``Var``)
-       - ``state_of_charge[node, t]`` -> stored energy / state of charge (kWh)
-       - ``charge_power[node, t]`` -> energy drawn from the grid/source to charge the battery
+       - ``state_of_charge[node, scenario, t]`` -> stored energy / state of charge (kWh); Stage-2, per scenario
+       - ``charge_power[node, scenario, t]`` -> energy drawn from the grid/source to charge the battery
          during the timestep (**kWh per timestep**; name retained for continuity — think of it as
          the interval-averaged charging power multiplied by ``time_step_hours``)
-       - ``discharge_power[node, t]`` -> energy delivered from the battery during the timestep
+       - ``discharge_power[node, scenario, t]`` -> energy delivered from the battery during the timestep
          (**kWh per timestep**; same convention as ``charge_power``)
        - ``energy_capacity_adopted[node]`` -> incremental storage energy capacity (kWh, only when adoption is enabled)
 
@@ -76,8 +79,8 @@ def add_battery_energy_storage_block(
        - ``total_energy_capacity[node]`` -> existing + adopted kWh, or existing only
 
     6. Contribution to electricity sources and sinks
-       - ``electricity_source_term[node, t]`` -> discharge power
-       - ``electricity_sink_term[node, t]`` -> charge power
+       - ``electricity_source_term[node, scenario, t]`` -> discharge power
+       - ``electricity_sink_term[node, scenario, t]`` -> charge power
 
     7. Contribution to the cost function
        - ``battery_capital_costs`` / ``battery_fixed_operations_and_maintenance`` (adopted kWh)
@@ -185,9 +188,14 @@ def add_battery_energy_storage_block(
                 mutable=False,
             )
 
-        battery_block.state_of_charge = pyo.Var(nodes, T, within=pyo.NonNegativeReals) #Battery SOC
-        battery_block.charge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals) # Battery Charging
-        battery_block.discharge_power = pyo.Var(nodes, T, within=pyo.NonNegativeReals) # Batery Discahrging
+        # Scenario-indexed (Stage-2 dispatch): each scenario gets its own independent SOC
+        # trajectory. The cyclic wraparound in battery_energy_balance_rule below (first
+        # timestep's predecessor is the last timestep of the SAME horizon) stays scoped to
+        # time only -- it never crosses scenarios as long as every state_of_charge/
+        # charge_power/discharge_power reference inside that rule carries the same s.
+        battery_block.state_of_charge = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals) #Battery SOC
+        battery_block.charge_power = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals) # Battery Charging
+        battery_block.discharge_power = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals) # Batery Discahrging
 
         ### If adoption is allowed, then include the adoption variable
         ### Both logical statements resolve potential existing battery 
@@ -206,77 +214,82 @@ def add_battery_energy_storage_block(
 
         # Usable SOC window (fraction of total kWh capacity: existing + adopted at each node).
         # First constraint forced mininmum SOC to be capacity*min_limit
-        def state_of_charge_minimum_rule(m, node, t):
+        def state_of_charge_minimum_rule(m, node, s, t):
             return (
-                m.state_of_charge[node, t]
+                m.state_of_charge[node, s, t]
                 >= m.minimum_state_of_charge * m.total_energy_capacity[node]
             )
 
         # Second constraint forced maximum SOC to be capacity*max_limit
-        def state_of_charge_maximum_rule(m, node, t):
+        def state_of_charge_maximum_rule(m, node, s, t):
             return (
-                m.state_of_charge[node, t]
+                m.state_of_charge[node, s, t]
                 <= m.maximum_state_of_charge * m.total_energy_capacity[node]
             )
         ### Adding the constraints to the block
         battery_block.state_of_charge_minimum = pyo.Constraint(
-            nodes, T, rule=state_of_charge_minimum_rule
+            nodes, model.SCENARIOS, T, rule=state_of_charge_minimum_rule
         )
         battery_block.state_of_charge_maximum = pyo.Constraint(
-            nodes, T, rule=state_of_charge_maximum_rule
+            nodes, model.SCENARIOS, T, rule=state_of_charge_maximum_rule
         )
 
         ### Adding the charge and discharge power limits constraints.
         # C-rate (kW/kWh) × capacity (kWh) = kW nameplate charge/discharge power.
         # Multiply by ``time_step_hours`` to bound the kWh-per-timestep flow variable.
-        def charge_power_limit_rule(m, node, t):
-            return m.charge_power[node, t] <= (
+        def charge_power_limit_rule(m, node, s, t):
+            return m.charge_power[node, s, t] <= (
                 m.max_charge_power_per_kwh * m.total_energy_capacity[node] * model.time_step_hours
             )
 
-        def discharge_power_limit_rule(m, node, t):
-            return m.discharge_power[node, t] <= (
+        def discharge_power_limit_rule(m, node, s, t):
+            return m.discharge_power[node, s, t] <= (
                 m.max_discharge_power_per_kwh * m.total_energy_capacity[node] * model.time_step_hours
             )
         ### Adding the max charge/discharge limit constraints to the block
-        battery_block.charge_power_limit = pyo.Constraint(nodes, T, rule=charge_power_limit_rule)
-        battery_block.discharge_power_limit = pyo.Constraint(nodes, T, rule=discharge_power_limit_rule)
+        battery_block.charge_power_limit = pyo.Constraint(nodes, model.SCENARIOS, T, rule=charge_power_limit_rule)
+        battery_block.discharge_power_limit = pyo.Constraint(nodes, model.SCENARIOS, T, rule=discharge_power_limit_rule)
 
         ### Adding the energy balance constraint to the block
-        def battery_energy_balance_rule(m, node, t):
+        def battery_energy_balance_rule(m, node, s, t):
             time_step_index = time_index[t]
             # Python list indexing for horizon[-1] is the last entry in horizon
             previous_time_step = horizon[-1] if time_step_index == 0 else horizon[time_step_index - 1]
-            return m.state_of_charge[node, t] == (
+            # Every state_of_charge/charge_power/discharge_power reference below carries the
+            # same scenario s -- each scenario's SOC trajectory (including the cyclic
+            # wraparound) is fully independent of every other scenario's.
+            return m.state_of_charge[node, s, t] == (
                 # Stored energy naturally decays each timestep by the retention factor.
-                m.state_of_charge_retention * m.state_of_charge[node, previous_time_step]
-                + m.charge_efficiency * m.charge_power[node, t]
-                - (1.0 / m.discharge_efficiency) * m.discharge_power[node, t]
+                m.state_of_charge_retention * m.state_of_charge[node, s, previous_time_step]
+                + m.charge_efficiency * m.charge_power[node, s, t]
+                - (1.0 / m.discharge_efficiency) * m.discharge_power[node, s, t]
             )
 
-        battery_block.energy_balance = pyo.Constraint(nodes, T, rule=battery_energy_balance_rule)
+        battery_block.energy_balance = pyo.Constraint(nodes, model.SCENARIOS, T, rule=battery_energy_balance_rule)
 
         if hasattr(battery_block, "initial_soc_fraction") and horizon:
             first_time_step = horizon[0]
 
-            def initial_soc_rule(m, node):
-                return m.state_of_charge[node, first_time_step] == (
+            def initial_soc_rule(m, node, s):
+                return m.state_of_charge[node, s, first_time_step] == (
                     m.initial_soc_fraction * m.total_energy_capacity[node]
                 )
 
-            battery_block.initial_soc = pyo.Constraint(nodes, rule=initial_soc_rule)
+            battery_block.initial_soc = pyo.Constraint(nodes, model.SCENARIOS, rule=initial_soc_rule)
 
         #Battery electricity source term
         battery_block.electricity_source_term = pyo.Expression(
             nodes,
+            model.SCENARIOS,
             T,
-            rule=lambda m, node, t: m.discharge_power[node, t],
+            rule=lambda m, node, s, t: m.discharge_power[node, s, t],
         )
         #Battery electricity sink term
         battery_block.electricity_sink_term = pyo.Expression(
             nodes,
+            model.SCENARIOS,
             T,
-            rule=lambda m, node, t: m.charge_power[node, t],
+            rule=lambda m, node, s, t: m.charge_power[node, s, t],
         )
 
         annualized_capital_if_adopted = None

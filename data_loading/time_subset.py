@@ -88,6 +88,54 @@ def apply_time_subset(data: DataContainer, cfg: TimeSubsetConfig) -> DataContain
                     sliced_by_id[vid] = [vals[i] for i in keep_idx]
                 ip_by_node[n] = sliced_by_id[vid]
 
+    # Slice per-scenario overrides too (scenario_timeseries, scenario_import_prices_by_node) —
+    # required so a run combining time_subset with scenarios doesn't silently leave scenario
+    # override series at the pre-subset length while base series get sliced, which would only
+    # surface later as a cryptic Pyomo indexing error inside model construction. Unlike the
+    # base timeseries/import_prices_by_node loops above (which silently skip a length
+    # mismatch, matching this module's pre-existing behavior), scenario override series are
+    # expected to ALWAYS match original_len by construction (validated when loaded in
+    # run.build_run_data._load_scenarios) -- a mismatch here means that invariant broke
+    # upstream, so this raises clearly rather than silently leaving a stale-length series.
+    # scenario_utility_rate_by_node holds parsed-rate metadata objects, not per-timestep
+    # lists, so it is not sliced.
+    scenario_ts = getattr(data, "scenario_timeseries", None)
+    if isinstance(scenario_ts, dict):
+        sliced_by_id_ts: dict[int, list] = {}
+        for scenario_key, per_scenario in scenario_ts.items():
+            for key, values in list(per_scenario.items()):
+                if not isinstance(values, list):
+                    continue
+                if len(values) != original_len:
+                    raise ValueError(
+                        f"scenario_timeseries[{scenario_key!r}][{key!r}] has length "
+                        f"{len(values)} but expected {original_len} (matching the base "
+                        "horizon before subsetting); scenario series must be loaded onto "
+                        "the same time axis as the base case."
+                    )
+                vid = id(values)
+                if vid not in sliced_by_id_ts:
+                    sliced_by_id_ts[vid] = [values[i] for i in keep_idx]
+                per_scenario[key] = sliced_by_id_ts[vid]
+
+    scenario_ip_by_node = getattr(data, "scenario_import_prices_by_node", None)
+    if isinstance(scenario_ip_by_node, dict):
+        sliced_by_id_ip: dict[int, list[float]] = {}
+        for scenario_key, per_scenario in scenario_ip_by_node.items():
+            for node, vals in list(per_scenario.items()):
+                if not isinstance(vals, list):
+                    continue
+                if len(vals) != original_len:
+                    raise ValueError(
+                        f"scenario_import_prices_by_node[{scenario_key!r}][{node!r}] has "
+                        f"length {len(vals)} but expected {original_len} (matching the base "
+                        "horizon before subsetting)."
+                    )
+                vid = id(vals)
+                if vid not in sliced_by_id_ip:
+                    sliced_by_id_ip[vid] = [vals[i] for i in keep_idx]
+                per_scenario[node] = sliced_by_id_ip[vid]
+
     data.indices["time"] = list(range(len(keep_idx)))
     data.static["time_subset_applied"] = {
         "months": sorted(keep_months) if keep_months else [],

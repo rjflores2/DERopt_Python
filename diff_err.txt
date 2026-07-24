@@ -1,0 +1,8 @@
+warning: LF will be replaced by CRLF in docs/DEVELOPMENT.md.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in technologies/battery_energy_storage/block.py.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in technologies/solar_pv/block.py.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tests/test_per_node_utility_tariffs.py.
+The file will have its original line endings in your working directory

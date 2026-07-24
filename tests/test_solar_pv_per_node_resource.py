@@ -27,6 +27,7 @@ def _build_minimal_model(nodes: list[str], horizon_len: int) -> pyo.ConcreteMode
     m = pyo.ConcreteModel()
     m.T = pyo.Set(initialize=list(range(horizon_len)), ordered=True)
     m.NODES = pyo.Set(initialize=nodes, ordered=True)
+    m.SCENARIOS = pyo.Set(initialize=["_default"], ordered=True)
     return m
 
 
@@ -75,7 +76,7 @@ def test_default_broadcasts_profile_series_to_every_node() -> None:
     for node in nodes:
         for t_idx, expected in enumerate(_DEFAULT_FIXED_TILT_SERIES):
             actual = float(
-                pyo.value(model.solar_pv.solar_potential[node, "solar_production__fixed_tilt", t_idx])
+                pyo.value(model.solar_pv.solar_potential[node, "solar_production__fixed_tilt", "_default", t_idx])
             )
             assert actual == pytest.approx(expected), (
                 f"Default (broadcast) failed at (node={node!r}, t={t_idx}): "
@@ -116,7 +117,7 @@ def test_per_node_override_applies_only_to_assigned_cells() -> None:
 
     for t_idx, expected in enumerate(_DEFAULT_FIXED_TILT_SERIES):
         actual = float(
-            pyo.value(model.solar_pv.solar_potential["node_A", "solar_production__fixed_tilt", t_idx])
+            pyo.value(model.solar_pv.solar_potential["node_A", "solar_production__fixed_tilt", "_default", t_idx])
         )
         assert actual == pytest.approx(expected), (
             f"Unassigned node_A should keep broadcast series at t={t_idx}: "
@@ -125,7 +126,7 @@ def test_per_node_override_applies_only_to_assigned_cells() -> None:
 
     for t_idx, expected in enumerate(_SITE_B_FIXED_TILT_SERIES):
         actual = float(
-            pyo.value(model.solar_pv.solar_potential["node_B", "solar_production__fixed_tilt", t_idx])
+            pyo.value(model.solar_pv.solar_potential["node_B", "solar_production__fixed_tilt", "_default", t_idx])
         )
         assert actual == pytest.approx(expected), (
             f"Assigned node_B should use site_b series at t={t_idx}: "
@@ -163,7 +164,7 @@ def test_tuple_keyed_assignment_accepted() -> None:
     )
 
     assert float(
-        pyo.value(model.solar_pv.solar_potential["node_B", "solar_production__fixed_tilt", 0])
+        pyo.value(model.solar_pv.solar_potential["node_B", "solar_production__fixed_tilt", "_default", 0])
     ) == pytest.approx(_SITE_B_FIXED_TILT_SERIES[0])
 
 

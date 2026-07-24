@@ -21,20 +21,32 @@ def collect_block_report(
 ) -> dict[str, Any]:
     """Scalar reporting metrics for the diesel block.
 
-    Emits ``capacity_factor`` = generation_kwh / (installed_kw * |T| * dt_hours).
+    Emits ``capacity_factor`` = expected_generation_kwh / (installed_kw * |T| * dt_hours),
+    where expected generation is probability-weighted across ``ctx["SCENARIOS"]`` (two-stage
+    stochastic; capacity itself is Stage-1 and shared across scenarios, only generation
+    varies by scenario).
     """
     T = ctx["T"]
     NODES = ctx["NODES"]
+    SCENARIOS = ctx["SCENARIOS"]
+    scenario_probability = ctx["scenario_probability"]
     dt_hours = float(ctx.get("dt_hours") or 1.0)
     if not hasattr(block, "diesel_generation") or not hasattr(block, "installed_capacity"):
         return {}
-    gen = float(sum(pyo.value(block.diesel_generation[n, t]) for n in NODES for t in T))
+    gen = float(
+        sum(
+            float(pyo.value(scenario_probability[s])) * pyo.value(block.diesel_generation[n, s, t])
+            for n in NODES
+            for s in SCENARIOS
+            for t in T
+        )
+    )
     cap_sum = float(sum(pyo.value(block.installed_capacity[n]) for n in NODES))
     denom = cap_sum * len(T) * dt_hours
     if denom <= 0:
         cf: dict[str, Any] = {
             "value": None,
-            "definition": "sum(diesel_generation) / (sum_installed_kw * |T| * dt_hours)",
+            "definition": "expected(diesel_generation) / (sum_installed_kw * |T| * dt_hours)",
             "note": "zero_capacity",
         }
     else:

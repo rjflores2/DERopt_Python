@@ -8,3 +8,4 @@ scipy
 
 [dev]
 pytest
+matplotlib

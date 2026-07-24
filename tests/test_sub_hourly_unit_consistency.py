@@ -87,9 +87,9 @@ def test_diesel_lp_capacity_constraint_scales_with_dt():
     for dt, expected_bound in [(1.0, 10.0), (0.5, 5.0)]:
         m = _build_diesel(dt_hours=dt)
         b = m.diesel_generator
-        con = b.generation_limits["electricity_load__n", 0]
+        con = b.generation_limits["electricity_load__n", "_default", 0]
         rhs = _constraint_rhs_when_var_zero(
-            m, con, b.diesel_generation["electricity_load__n", 0]
+            m, con, b.diesel_generation["electricity_load__n", "_default", 0]
         )
         assert rhs == pytest.approx(expected_bound)
 
@@ -99,8 +99,8 @@ def test_diesel_variable_cost_correct_at_sub_hourly():
     m = _build_diesel(dt_hours=0.5)
     b = m.diesel_generator
     # Pin diesel_generation to 4 kWh at t=0 (i.e. 8 kW average over a half-hour), 0 elsewhere
-    b.diesel_generation["electricity_load__n", 0].value = 4.0
-    b.diesel_generation["electricity_load__n", 1].value = 0.0
+    b.diesel_generation["electricity_load__n", "_default", 0].value = 4.0
+    b.diesel_generation["electricity_load__n", "_default", 1].value = 0.0
     # cost = variable_om_per_kwh * 4 kWh (not * 4 * 0.5)
     expected = float(pyo.value(b.variable_om_per_kwh)) * 4.0
     assert pyo.value(b.diesel_variable_om_cost) == pytest.approx(expected)
@@ -132,13 +132,13 @@ def test_battery_c_rate_constraint_scales_with_dt():
         b = m.battery_energy_storage
         rhs_c = _constraint_rhs_when_var_zero(
             m,
-            b.charge_power_limit["electricity_load__n", 0],
-            b.charge_power["electricity_load__n", 0],
+            b.charge_power_limit["electricity_load__n", "_default", 0],
+            b.charge_power["electricity_load__n", "_default", 0],
         )
         rhs_d = _constraint_rhs_when_var_zero(
             m,
-            b.discharge_power_limit["electricity_load__n", 0],
-            b.discharge_power["electricity_load__n", 0],
+            b.discharge_power_limit["electricity_load__n", "_default", 0],
+            b.discharge_power["electricity_load__n", "_default", 0],
         )
         assert rhs_c == pytest.approx(expected)
         assert rhs_d == pytest.approx(expected)
@@ -150,15 +150,15 @@ def test_battery_soc_update_no_dt_multiplier():
     b = m.battery_energy_storage
     # Pin: soc[t-1]=50, charge_power[t]=2, discharge_power[t]=1, eff=1 for simplicity
     # (real efficiency comes from params; we use them symbolically via evaluation)
-    b.state_of_charge["electricity_load__n", 0].value = 0.0
-    b.state_of_charge["electricity_load__n", 1].value = 0.0
-    b.charge_power["electricity_load__n", 1].value = 2.0
-    b.discharge_power["electricity_load__n", 1].value = 1.0
+    b.state_of_charge["electricity_load__n", "_default", 0].value = 0.0
+    b.state_of_charge["electricity_load__n", "_default", 1].value = 0.0
+    b.charge_power["electricity_load__n", "_default", 1].value = 2.0
+    b.discharge_power["electricity_load__n", "_default", 1].value = 1.0
     ec = float(pyo.value(b.charge_efficiency))
     ed = float(pyo.value(b.discharge_efficiency))
     ret = float(pyo.value(b.state_of_charge_retention))
     # body = soc[t] - (ret * soc[t-1] + ec * charge - discharge / ed)
-    con = b.energy_balance["electricity_load__n", 1]
+    con = b.energy_balance["electricity_load__n", "_default", 1]
     body = pyo.value(con.body)
     # soc[t]=0, soc[t-1]=0 → body = 0 - (0 + ec*2 - 1/ed) = -(ec*2 - 1/ed)
     expected_body = 0.0 - (0.0 + ec * 2.0 - 1.0 / ed)
@@ -185,13 +185,13 @@ def test_flow_battery_power_cap_scales_with_dt():
         b = m.flow_battery_energy_storage
         rhs_c = _constraint_rhs_when_var_zero(
             m,
-            b.charge_power_limit["electricity_load__n", 0],
-            b.charge_power["electricity_load__n", 0],
+            b.charge_power_limit["electricity_load__n", "_default", 0],
+            b.charge_power["electricity_load__n", "_default", 0],
         )
         rhs_d = _constraint_rhs_when_var_zero(
             m,
-            b.discharge_power_limit["electricity_load__n", 0],
-            b.discharge_power["electricity_load__n", 0],
+            b.discharge_power_limit["electricity_load__n", "_default", 0],
+            b.discharge_power["electricity_load__n", "_default", 0],
         )
         assert rhs_c == pytest.approx(expected)
         assert rhs_d == pytest.approx(expected)
@@ -219,13 +219,13 @@ def test_h2_storage_c_rate_scales_with_dt():
         b = m.compressed_gas_hydrogen_storage
         rhs_c = _constraint_rhs_when_var_zero(
             m,
-            b.hydrogen_charge_limit["electricity_load__n", 0],
-            b.hydrogen_charge_flow["electricity_load__n", 0],
+            b.hydrogen_charge_limit["electricity_load__n", "_default", 0],
+            b.hydrogen_charge_flow["electricity_load__n", "_default", 0],
         )
         rhs_d = _constraint_rhs_when_var_zero(
             m,
-            b.hydrogen_discharge_limit["electricity_load__n", 0],
-            b.hydrogen_discharge_flow["electricity_load__n", 0],
+            b.hydrogen_discharge_limit["electricity_load__n", "_default", 0],
+            b.hydrogen_discharge_flow["electricity_load__n", "_default", 0],
         )
         assert rhs_c == pytest.approx(expected)
         assert rhs_d == pytest.approx(expected)

@@ -55,7 +55,7 @@ def test_hydrokinetic_lp_block_builds():
         financials={},
     )
     assert hasattr(m, "hydrokinetic")
-    y00 = pyo.value(m.hydrokinetic.yield_kwh_per_m2["hydrokinetic_production__site_a", 0])
+    y00 = pyo.value(m.hydrokinetic.yield_kwh_per_m2["hydrokinetic_production__site_a", "_default", 0])
     assert y00 == pytest.approx(80.0 / 18.0)
 
 

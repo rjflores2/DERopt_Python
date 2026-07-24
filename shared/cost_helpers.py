@@ -93,20 +93,29 @@ def time_summed_variable_cost(
     flow_var,
     nodes,
     time_set,
+    scenarios,
+    scenario_probability,
     dt_hours=1.0,
     efficiency_divisor=1.0,
 ) -> pyo.Expression:
-    """Return ``Expression`` for ``sum_{n,t} (cost_per_unit / efficiency_divisor) * flow_var[n,t] * dt_hours``.
+    """Return ``Expression`` for
+    ``sum_{n,s,t} scenario_probability[s] * (cost_per_unit / efficiency_divisor) * flow_var[n,s,t] * dt_hours``.
 
     Covers variable O&M (default ``efficiency_divisor=1.0``) and fuel cost (pass the
     electric-generation-to-fuel-input conversion as ``efficiency_divisor``, e.g. diesel's
-    ``electric_efficiency``).
+    ``electric_efficiency``). ``flow_var`` is a Stage-2 (scenario-indexed) dispatch variable;
+    probability-weighting it here is what turns a per-scenario variable cost into the scalar
+    expected-cost contribution ``attach_standard_cost_expressions`` combines with the
+    (scenario-independent) capital/fixed-O&M terms into ``objective_contribution``.
 
     Args:
         cost_per_unit: Scalar Param, e.g. ``variable_om_per_kwh`` or ``fuel_cost_per_kwh_diesel``.
-        flow_var: Var indexed by ``[node, t]``, typically generation or consumption.
+        flow_var: Var indexed by ``[node, scenario, t]``, typically generation or consumption.
         nodes: Iterable of node keys.
         time_set: Iterable of time indices.
+        scenarios: Iterable of scenario keys (typically ``model.SCENARIOS``).
+        scenario_probability: Mapping/Param from scenario key to probability (typically
+            ``model.scenario_probability``), summing to 1.0 across ``scenarios``.
         dt_hours: Float or scalar Param; converts per-timestep kW to kWh when the flow
             variable is in kW. If ``flow_var`` is already per-timestep energy, pass 1.0.
         efficiency_divisor: Scalar Param or float. Use to convert electric output to fuel
@@ -114,8 +123,12 @@ def time_summed_variable_cost(
     """
     return pyo.Expression(
         expr=sum(
-            (cost_per_unit / efficiency_divisor) * flow_var[n, t] * dt_hours
+            scenario_probability[s]
+            * (cost_per_unit / efficiency_divisor)
+            * flow_var[n, s, t]
+            * dt_hours
             for n in nodes
+            for s in scenarios
             for t in time_set
         )
     )

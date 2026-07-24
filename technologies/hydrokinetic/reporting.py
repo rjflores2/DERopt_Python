@@ -21,10 +21,15 @@ def collect_block_report(
 ) -> dict[str, Any]:
     """Scalar reporting metrics for the hydrokinetic block.
 
-    Emits ``capacity_factor`` = generation_kwh / (installed_kw * |T| * dt_hours).
+    Emits ``capacity_factor`` = expected(hkt_generation) / (installed_kw * |T| * dt_hours),
+    where expected generation is probability-weighted across ``ctx["SCENARIOS"]`` (two-stage
+    stochastic; capacity itself is Stage-1 and shared across scenarios, only generation
+    varies by scenario).
     """
     T = ctx["T"]
     NODES = ctx["NODES"]
+    SCENARIOS = ctx["SCENARIOS"]
+    scenario_probability = ctx["scenario_probability"]
     dt_hours = float(ctx.get("dt_hours") or 1.0)
     if not hasattr(block, "hkt_generation") or not hasattr(block, "total_capacity_kw"):
         return {}
@@ -34,19 +39,21 @@ def collect_block_report(
     for n in NODES:
         for h in hkt_set:
             cap_sum += float(pyo.value(block.total_capacity_kw[n, h]))
-            for t in T:
-                gen += float(pyo.value(block.hkt_generation[n, h, t]))
+            for s in SCENARIOS:
+                prob = float(pyo.value(scenario_probability[s]))
+                for t in T:
+                    gen += prob * float(pyo.value(block.hkt_generation[n, h, s, t]))
     denom = cap_sum * len(T) * dt_hours
     if denom <= 0:
         cf: dict[str, Any] = {
             "value": None,
-            "definition": "sum(hkt_generation) / (sum_total_capacity_kw * |T| * dt_hours)",
+            "definition": "expected(hkt_generation) / (sum_total_capacity_kw * |T| * dt_hours)",
             "note": "zero_capacity",
         }
     else:
         cf = {
             "value": gen / denom,
-            "definition": "sum(hkt_generation_kwh) / (sum_installed_kw * horizon_kwh_at_nameplate)",
+            "definition": "expected(hkt_generation_kwh) / (sum_installed_kw * horizon_kwh_at_nameplate)",
             "generation_kwh": gen,
             "installed_kw_sum": cap_sum,
         }

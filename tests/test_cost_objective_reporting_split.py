@@ -39,7 +39,7 @@ def test_utility_fixed_charge_excluded_from_objective_kept_for_reporting():
     data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
     m = build_model(data, technology_parameters={}, financials={})
     # Keep unsolved expression evaluation stable.
-    m.utility.grid_import["electricity_load__x", 0].value = 0.0
+    m.utility.grid_import["electricity_load__x", "_default", 0].value = 0.0
 
     assert pyo.value(m.utility.objective_contribution) == pytest.approx(0.0)
     assert pyo.value(m.utility.cost_non_optimizing_annual) == pytest.approx(10.0)
@@ -101,8 +101,8 @@ def test_fixed_background_only_case_reports_total_even_with_zero_objective():
         },
     }
     m = build_model(data, technology_parameters=tech, financials={})
-    m.utility.grid_import["electricity_load__x", 0].value = 0.0
-    m.solar_pv.solar_generation["electricity_load__x", "solar_p", 0].value = 0.0
+    m.utility.grid_import["electricity_load__x", "_default", 0].value = 0.0
+    m.solar_pv.solar_generation["electricity_load__x", "solar_p", "_default", 0].value = 0.0
     extracted = extract_solution(m, data)
 
     assert extracted["objective_value"] == pytest.approx(0.0)

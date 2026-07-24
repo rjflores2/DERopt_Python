@@ -26,10 +26,15 @@ def collect_block_report(
 ) -> dict[str, Any]:
     """Scalar reporting metrics for the solar PV block.
 
-    Emits ``capacity_factor`` = sum(solar_generation) / sum(installed_kw * solar_potential).
+    Emits ``capacity_factor`` = expected(solar_generation) / expected(installed_kw * solar_potential),
+    where the expectation is probability-weighted across ``ctx["SCENARIOS"]`` (two-stage
+    stochastic; capacity itself is Stage-1 and shared across scenarios, only generation and
+    resource potential vary by scenario).
     """
     T = ctx["T"]
     NODES = ctx["NODES"]
+    SCENARIOS = ctx["SCENARIOS"]
+    scenario_probability = ctx["scenario_probability"]
     if not hasattr(block, "solar_generation") or not hasattr(block, "solar_potential"):
         return {}
     profiles = list(block.SOLAR)
@@ -40,21 +45,23 @@ def collect_block_report(
             cap = float(pyo.value(block.existing_solar_capacity[n, p]))
             if hasattr(block, "solar_capacity_adopted"):
                 cap += float(pyo.value(block.solar_capacity_adopted[n, p]))
-            for t in T:
-                pot = float(pyo.value(block.solar_potential[n, p, t]))
-                g = float(pyo.value(block.solar_generation[n, p, t]))
-                gen += g
-                max_kwh += cap * pot
+            for s in SCENARIOS:
+                prob = float(pyo.value(scenario_probability[s]))
+                for t in T:
+                    pot = float(pyo.value(block.solar_potential[n, p, s, t]))
+                    g = float(pyo.value(block.solar_generation[n, p, s, t]))
+                    gen += prob * g
+                    max_kwh += prob * cap * pot
     if max_kwh <= 0:
         cf: dict[str, Any] = {
             "value": None,
-            "definition": "sum(solar_generation) / sum_{n,p,t}(installed_kw_npt * solar_potential_npt)",
+            "definition": "expected(solar_generation) / expected_{n,p,t}(installed_kw_np * solar_potential_npt)",
             "note": "zero_capacity_or_potential",
         }
     else:
         cf = {
             "value": gen / max_kwh,
-            "definition": "sum(solar_generation) / sum_{n,p,t}(installed_kw_np * solar_potential_npt)",
+            "definition": "expected(solar_generation) / expected_{n,p,t}(installed_kw_np * solar_potential_npt)",
             "generation_kwh": gen,
             "max_possible_kwh_if_at_potential": max_kwh,
         }

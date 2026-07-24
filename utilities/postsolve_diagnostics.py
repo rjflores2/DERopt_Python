@@ -48,18 +48,19 @@ def check_simultaneous_charge_discharge(
 
     Returns:
         Dict keyed by block name. Each entry contains:
-            simultaneous_timesteps: number of (node, t) pairs with both flows > tolerance
-            total_timesteps: len(NODES) * len(T) for that block (denominator reference)
+            simultaneous_timesteps: number of (node, scenario, t) triples with both flows > tolerance
+            total_timesteps: len(NODES) * len(SCENARIOS) * len(T) for that block (denominator reference)
             simultaneous_throughput: sum of min(charge, discharge) across all flagged
-                (node, t) pairs — interpretable as "energy burned by round-tripping"
+                (node, scenario, t) triples — interpretable as "energy burned by round-tripping"
             total_charge / total_discharge: horizon totals for context
             fraction_of_charge: simultaneous_throughput / total_charge (0 if total_charge == 0)
-            top_offenders: up to ``max_offenders`` worst (node, t) pairs by simultaneous flow
+            top_offenders: up to ``max_offenders`` worst (node, scenario, t) triples by simultaneous flow
             units: unit label for the throughput metrics ("kWh" or "kWh-H2_LHV")
         Blocks without matching flow var pairs are omitted.
     """
     report: dict[str, Any] = {}
     nodes = list(model.NODES)
+    scenarios = list(model.SCENARIOS)
     time_set = list(model.T)
 
     for blk in model.component_objects(pyo.Block, descend_into=False):
@@ -73,6 +74,7 @@ def check_simultaneous_charge_discharge(
                 charge_var=charge_var,
                 discharge_var=discharge_var,
                 nodes=nodes,
+                scenarios=scenarios,
                 time_set=time_set,
                 tolerance=tolerance,
                 max_offenders=max_offenders,
@@ -90,45 +92,49 @@ def _scan_block(
     charge_var: pyo.Var,
     discharge_var: pyo.Var,
     nodes: list,
+    scenarios: list,
     time_set: list,
     tolerance: float,
     max_offenders: int,
     unit_label: str,
 ) -> dict[str, Any] | None:
-    """Evaluate charge/discharge vars at every (node, t) and compile the block-level report.
+    """Evaluate charge/discharge vars at every (node, scenario, t) and compile the block-level report.
 
     Returns ``None`` if no variable values are available (e.g. model not yet solved).
     """
-    offenders: list[tuple[float, str, Any, float, float]] = []  # (simultaneous, n, t, c, d)
+    # (simultaneous_throughput, n, scenario, t, c, d) -- named to avoid colliding with
+    # the scenario loop variable below.
+    offenders: list[tuple[float, str, Any, Any, float, float]] = []
     simultaneous_total = 0.0
     total_charge = 0.0
     total_discharge = 0.0
     simultaneous_count = 0
 
     for n in nodes:
-        for t in time_set:
-            c_val = pyo.value(charge_var[n, t], exception=False)
-            d_val = pyo.value(discharge_var[n, t], exception=False)
-            # A variable with no value (unsolved / uninitialized) returns None; skip
-            # rather than crash — the check is best-effort.
-            if c_val is None or d_val is None:
-                return None
-            c = float(c_val)
-            d = float(d_val)
-            total_charge += c
-            total_discharge += d
-            # Simultaneous only when *both* exceed tolerance; single-direction
-            # flow is the normal operating mode and must not trip the flag.
-            if c > tolerance and d > tolerance:
-                simultaneous = min(c, d)
-                simultaneous_total += simultaneous
-                simultaneous_count += 1
-                offenders.append((simultaneous, n, t, c, d))
+        for scenario in scenarios:
+            for t in time_set:
+                c_val = pyo.value(charge_var[n, scenario, t], exception=False)
+                d_val = pyo.value(discharge_var[n, scenario, t], exception=False)
+                # A variable with no value (unsolved / uninitialized) returns None; skip
+                # rather than crash — the check is best-effort.
+                if c_val is None or d_val is None:
+                    return None
+                c = float(c_val)
+                d = float(d_val)
+                total_charge += c
+                total_discharge += d
+                # Simultaneous only when *both* exceed tolerance; single-direction
+                # flow is the normal operating mode and must not trip the flag.
+                if c > tolerance and d > tolerance:
+                    simultaneous_throughput = min(c, d)
+                    simultaneous_total += simultaneous_throughput
+                    simultaneous_count += 1
+                    offenders.append((simultaneous_throughput, n, scenario, t, c, d))
 
     if simultaneous_count == 0:
         return {
             "simultaneous_timesteps": 0,
-            "total_timesteps": len(nodes) * len(time_set),
+            "total_timesteps": len(nodes) * len(scenarios) * len(time_set),
             "simultaneous_throughput": 0.0,
             "total_charge": total_charge,
             "total_discharge": total_discharge,
@@ -139,13 +145,13 @@ def _scan_block(
 
     offenders.sort(key=lambda row: row[0], reverse=True)
     top = [
-        {"node": str(n), "t": t, "charge": c, "discharge": d, "simultaneous": s}
-        for (s, n, t, c, d) in offenders[:max_offenders]
+        {"node": str(n), "scenario": str(scenario), "t": t, "charge": c, "discharge": d, "simultaneous": sim}
+        for (sim, n, scenario, t, c, d) in offenders[:max_offenders]
     ]
 
     return {
         "simultaneous_timesteps": simultaneous_count,
-        "total_timesteps": len(nodes) * len(time_set),
+        "total_timesteps": len(nodes) * len(scenarios) * len(time_set),
         "simultaneous_throughput": simultaneous_total,
         "total_charge": total_charge,
         "total_discharge": total_discharge,
@@ -188,7 +194,7 @@ def format_simultaneous_charge_discharge_warnings(report: dict[str, Any]) -> lis
         )
         for off in entry.get("top_offenders", []):
             lines.append(
-                f"      node={off['node']} t={off['t']}: "
+                f"      node={off['node']} scenario={off['scenario']} t={off['t']}: "
                 f"charge={off['charge']:.3f} {units}, discharge={off['discharge']:.3f} {units}"
             )
         if severity == "note":

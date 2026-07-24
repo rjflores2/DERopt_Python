@@ -7,9 +7,10 @@ Wind is modeled per node and per profile:
 - Profiles: one per wind resource column in the input file (data.static["wind_production_keys"]).
   Multiple profiles allow different turbine types or sites to be compared within a single run.
 
-Wind potential is indexed per (node, profile, t) but is node-invariant by design: all nodes
-share the same wind resource time series. This is appropriate for small-scale, co-located
-systems where spatial variation in wind is negligible.
+Wind potential is indexed per (node, profile, scenario, t) but is node-invariant by design:
+all nodes share the same wind resource time series. This is appropriate for small-scale,
+co-located systems where spatial variation in wind is negligible. A scenario without its
+own wind override falls back to the base series for every scenario.
 
 Keep this block simple and well commented; technology components are a main place
 for manual programming and must stay transparent.
@@ -26,6 +27,7 @@ from shared.cost_helpers import (
     annualized_fixed_cost_by_node_category,
     attach_standard_cost_expressions,
 )
+from shared.scenario_helpers import series_for_scenario
 
 from .inputs import resolve_wind_block_inputs
 
@@ -54,19 +56,20 @@ def add_wind_turbine_block(
        - ``wind_block.CAPACITY_LIMIT_INDEX`` -> index of ``(node, profile)`` pairs where a capacity limit is defined
 
     3. Variables (Pyomo ``Var``)
-       - ``wind_generation[node, wind_profile, t]`` -> kWh generated in period ``t``
-       - ``wind_capacity_adopted[node, wind_profile]`` -> additional kW to install (only if adoption is allowed)
+       - ``wind_generation[node, wind_profile, scenario, t]`` -> kWh generated in period ``t``, per scenario
+       - ``wind_capacity_adopted[node, wind_profile]`` -> additional kW to install (only if adoption is allowed; Stage-1, scenario-independent)
 
     4. Parameters (Pyomo ``Param``)
-       - ``wind_potential[node, wind_profile, t]`` -> wind potential from ``data.timeseries`` (kWh/kW);
-         node-invariant by design — all nodes share the same wind resource time series
+       - ``wind_potential[node, wind_profile, scenario, t]`` -> wind potential from ``data.timeseries``
+         (or a scenario's own resource override) (kWh/kW); node-invariant by design — all nodes
+         share the same wind resource time series
        - ``capital_cost_per_kw[wind_profile]`` -> wind turbine capital cost ($/kW installed)
        - ``om_per_kw_year[wind_profile]`` -> wind turbine fixed O&M cost ($/kW-year)
        - ``existing_wind_capacity[node, wind_profile]`` -> pre-existing wind capacity at each node (kW)
        - ``max_capacity[node, wind_profile]`` -> maximum allowable installed capacity on indexed pairs (kW)
 
-    5. Contribution to electricity sources - ``electricity_source_term[node, t]``
-       - sum of ``wind_generation[node, wind_profile, t]`` across all wind profiles
+    5. Contribution to electricity sources - ``electricity_source_term[node, scenario, t]``
+       - sum of ``wind_generation[node, wind_profile, scenario, t]`` across all wind profiles
 
     6. Contribution to the cost function - ``objective_contribution``
        - adopted wind capacity -> annualized capital on adopted kW plus fixed O&M on adopted kW
@@ -84,7 +87,12 @@ def add_wind_turbine_block(
         raise ValueError(
             "wind_turbine block requires data.static['wind_production_keys'] (load wind data first)"
         )
-    production_by_profile = {key: list(data.timeseries[key]) for key in wind_profiles}
+    scenario_keys = list(data.scenario_keys)
+    # A scenario without its own wind override falls back to the same base series for
+    # every scenario (see shared.scenario_helpers.series_for_scenario).
+    production_by_profile_scenario = {
+        (key, s): series_for_scenario(data, s, key) for key in wind_profiles for s in scenario_keys
+    }
 
     allow_adoption = (wind_turbine_params or {}).get("allow_adoption", True)
     resolved = resolve_wind_block_inputs(
@@ -100,11 +108,13 @@ def add_wind_turbine_block(
         wind_block.wind_potential = pyo.Param(
             model.NODES,
             wind_block.WIND,
+            model.SCENARIOS,
             T,
             initialize={
-                (node, wind_profile, t): production_by_profile[wind_profile][t]
+                (node, wind_profile, s, t): production_by_profile_scenario[(wind_profile, s)][t]
                 for node in nodes
                 for wind_profile in wind_profiles
+                for s in scenario_keys
                 for t in T
             },
             within=pyo.NonNegativeReals,
@@ -145,18 +155,23 @@ def add_wind_turbine_block(
                 mutable=False,
             )
 
-        wind_block.wind_generation = pyo.Var(nodes, wind_block.WIND, T, within=pyo.NonNegativeReals)
+        # Scenario-indexed (Stage-2 dispatch): each scenario gets its own generation trajectory.
+        wind_block.wind_generation = pyo.Var(
+            nodes, wind_block.WIND, model.SCENARIOS, T, within=pyo.NonNegativeReals
+        )
 
         if allow_adoption:
             wind_block.wind_capacity_adopted = pyo.Var(nodes, wind_block.WIND, within=pyo.NonNegativeReals)
 
-            def generation_limits_rule(m, node, profile, t):
-                return m.wind_generation[node, profile, t] <= (
+            def generation_limits_rule(m, node, profile, s, t):
+                return m.wind_generation[node, profile, s, t] <= (
                     (m.existing_wind_capacity[node, profile] + m.wind_capacity_adopted[node, profile])
-                    * m.wind_potential[node, profile, t]
+                    * m.wind_potential[node, profile, s, t]
                 )
 
-            wind_block.generation_limits = pyo.Constraint(nodes, wind_block.WIND, T, rule=generation_limits_rule)
+            wind_block.generation_limits = pyo.Constraint(
+                nodes, wind_block.WIND, model.SCENARIOS, T, rule=generation_limits_rule
+            )
 
             if resolved.has_capacity_limits:
 
@@ -184,13 +199,13 @@ def add_wind_turbine_block(
             )
         else:
 
-            def generation_limits_rule_existing_only(m, node, profile, t):
-                return m.wind_generation[node, profile, t] <= (
-                    m.existing_wind_capacity[node, profile] * m.wind_potential[node, profile, t]
+            def generation_limits_rule_existing_only(m, node, profile, s, t):
+                return m.wind_generation[node, profile, s, t] <= (
+                    m.existing_wind_capacity[node, profile] * m.wind_potential[node, profile, s, t]
                 )
 
             wind_block.generation_limits = pyo.Constraint(
-                nodes, wind_block.WIND, T, rule=generation_limits_rule_existing_only
+                nodes, wind_block.WIND, model.SCENARIOS, T, rule=generation_limits_rule_existing_only
             )
             annualized_capital_if_adopted = None
             fixed_om_adopted_if_adopted = None
@@ -216,9 +231,10 @@ def add_wind_turbine_block(
 
         wind_block.electricity_source_term = pyo.Expression(
             nodes,
+            model.SCENARIOS,
             T,
-            rule=lambda m, node, t: sum(
-                m.wind_generation[node, wind_profile, t] for wind_profile in m.WIND
+            rule=lambda m, node, s, t: sum(
+                m.wind_generation[node, wind_profile, s, t] for wind_profile in m.WIND
             ),
         )
 

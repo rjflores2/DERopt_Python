@@ -22,6 +22,7 @@ from shared.cost_helpers import (
     attach_standard_cost_expressions,
     time_summed_variable_cost,
 )
+from shared.scenario_helpers import series_for_scenario
 
 from .inputs import (
     FORMULATION_PEM_FUEL_CELL_BINARY,
@@ -75,12 +76,15 @@ def add_pem_fuel_cell_block(
     )
     formulation = resolved.formulation
     allow_adoption = resolved.allow_adoption
-    T_list = list(T)
-
+    scenario_keys = list(data.scenario_keys)
     max_load_kwh_by_node: dict[str, float] = {}
     if formulation == FORMULATION_PEM_FUEL_CELL_BINARY:
+        # Big-M must be valid for every scenario's load, not just the base series. Each
+        # scenario's series is resolved once (not once per timestep) since
+        # series_for_scenario doesn't depend on t.
         max_load_kwh_by_node = {
-            node: max(float(data.timeseries[node][t]) for t in T_list) for node in nodes
+            node: max(max(series_for_scenario(data, s, node)) for s in scenario_keys)
+            for node in nodes
         }
 
     def block_rule(fc_block):
@@ -138,7 +142,10 @@ def add_pem_fuel_cell_block(
             initialize=resolved.amortization_factor, within=pyo.NonNegativeReals, mutable=False
         )
 
-        fc_block.electricity_generation_kwh_electric = pyo.Var(nodes, T, within=pyo.NonNegativeReals)
+        # Scenario-indexed (Stage-2 dispatch): each scenario gets its own generation trajectory.
+        fc_block.electricity_generation_kwh_electric = pyo.Var(
+            nodes, model.SCENARIOS, T, within=pyo.NonNegativeReals
+        )
 
         if formulation in (FORMULATION_PEM_FUEL_CELL_LP, FORMULATION_PEM_FUEL_CELL_BINARY):
             if allow_adoption:
@@ -165,32 +172,39 @@ def add_pem_fuel_cell_block(
                 nodes, rule=max_energy_per_timestep_rule
             )
 
-            def generation_capacity_rule(m, node, t):
-                return m.electricity_generation_kwh_electric[node, t] <= m.max_electricity_kwh_electric_per_timestep[
-                    node
-                ]
+            def generation_capacity_rule(m, node, s, t):
+                return m.electricity_generation_kwh_electric[node, s, t] <= (
+                    m.max_electricity_kwh_electric_per_timestep[node]
+                )
 
-            fc_block.generation_capacity_limit = pyo.Constraint(nodes, T, rule=generation_capacity_rule)
+            fc_block.generation_capacity_limit = pyo.Constraint(
+                nodes, model.SCENARIOS, T, rule=generation_capacity_rule
+            )
 
             if formulation == FORMULATION_PEM_FUEL_CELL_BINARY:
                 fc_block.maximum_load_kwh_per_timestep = pyo.Param(
                     nodes, initialize=max_load_kwh_by_node, within=pyo.NonNegativeReals, mutable=False
                 )
-                fc_block.fuel_cell_on = pyo.Var(nodes, T, within=pyo.Binary)
+                # Scenario-indexed (Stage-2): each scenario has its own commitment schedule.
+                fc_block.fuel_cell_on = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.Binary)
 
-                def generation_big_m_rule(m, node, t):
-                    return m.electricity_generation_kwh_electric[node, t] <= m.maximum_load_kwh_per_timestep[
-                        node
-                    ] * m.fuel_cell_on[node, t]
-
-                def generation_min_load_rule(m, node, t):
-                    return m.electricity_generation_kwh_electric[node, t] >= (
-                        m.minimum_loading_fraction * m.max_electricity_kwh_electric_per_timestep[node]
-                        - m.maximum_load_kwh_per_timestep[node] * (1 - m.fuel_cell_on[node, t])
+                def generation_big_m_rule(m, node, s, t):
+                    return m.electricity_generation_kwh_electric[node, s, t] <= (
+                        m.maximum_load_kwh_per_timestep[node] * m.fuel_cell_on[node, s, t]
                     )
 
-                fc_block.generation_commitment_big_m = pyo.Constraint(nodes, T, rule=generation_big_m_rule)
-                fc_block.generation_min_loading = pyo.Constraint(nodes, T, rule=generation_min_load_rule)
+                def generation_min_load_rule(m, node, s, t):
+                    return m.electricity_generation_kwh_electric[node, s, t] >= (
+                        m.minimum_loading_fraction * m.max_electricity_kwh_electric_per_timestep[node]
+                        - m.maximum_load_kwh_per_timestep[node] * (1 - m.fuel_cell_on[node, s, t])
+                    )
+
+                fc_block.generation_commitment_big_m = pyo.Constraint(
+                    nodes, model.SCENARIOS, T, rule=generation_big_m_rule
+                )
+                fc_block.generation_min_loading = pyo.Constraint(
+                    nodes, model.SCENARIOS, T, rule=generation_min_load_rule
+                )
 
             annualized_capital_if_adopted = None
             fixed_om_adopted_if_adopted = None
@@ -234,24 +248,29 @@ def add_pem_fuel_cell_block(
                 nodes,
                 rule=lambda m, node: m.existing_unit_count[node] + m.unit_adoption_limit[node],
             )
-            fc_block.units_on = pyo.Var(nodes, T, within=pyo.NonNegativeIntegers)
+            # Scenario-indexed (Stage-2): each scenario has its own unit-commitment schedule.
+            fc_block.units_on = pyo.Var(nodes, model.SCENARIOS, T, within=pyo.NonNegativeIntegers)
 
-            def units_on_limit_rule(m, node, t):
-                return m.units_on[node, t] <= m.installed_unit_count[node]
+            def units_on_limit_rule(m, node, s, t):
+                return m.units_on[node, s, t] <= m.installed_unit_count[node]
 
-            def generation_upper_units_rule(m, node, t):
+            def generation_upper_units_rule(m, node, s, t):
                 cap_e = m.unit_capacity_kw * model.time_step_hours
-                return m.electricity_generation_kwh_electric[node, t] <= cap_e * m.units_on[node, t]
+                return m.electricity_generation_kwh_electric[node, s, t] <= cap_e * m.units_on[node, s, t]
 
-            def generation_lower_units_rule(m, node, t):
+            def generation_lower_units_rule(m, node, s, t):
                 cap_e = m.unit_capacity_kw * model.time_step_hours
-                return m.electricity_generation_kwh_electric[node, t] >= (
-                    m.minimum_loading_fraction * cap_e * m.units_on[node, t]
+                return m.electricity_generation_kwh_electric[node, s, t] >= (
+                    m.minimum_loading_fraction * cap_e * m.units_on[node, s, t]
                 )
 
-            fc_block.units_on_limit = pyo.Constraint(nodes, T, rule=units_on_limit_rule)
-            fc_block.generation_upper_by_units = pyo.Constraint(nodes, T, rule=generation_upper_units_rule)
-            fc_block.generation_lower_by_units = pyo.Constraint(nodes, T, rule=generation_lower_units_rule)
+            fc_block.units_on_limit = pyo.Constraint(nodes, model.SCENARIOS, T, rule=units_on_limit_rule)
+            fc_block.generation_upper_by_units = pyo.Constraint(
+                nodes, model.SCENARIOS, T, rule=generation_upper_units_rule
+            )
+            fc_block.generation_lower_by_units = pyo.Constraint(
+                nodes, model.SCENARIOS, T, rule=generation_lower_units_rule
+            )
 
             annualized_capital_if_adopted = None
             fixed_om_adopted_if_adopted = None
@@ -276,8 +295,9 @@ def add_pem_fuel_cell_block(
 
         fc_block.hydrogen_consumption_kwh_h2_lhv = pyo.Expression(
             nodes,
+            model.SCENARIOS,
             T,
-            rule=lambda m, node, t: m.electricity_generation_kwh_electric[node, t]
+            rule=lambda m, node, s, t: m.electricity_generation_kwh_electric[node, s, t]
             / m.hydrogen_lhv_to_electric_efficiency,
         )
 
@@ -286,6 +306,8 @@ def add_pem_fuel_cell_block(
             flow_var=fc_block.electricity_generation_kwh_electric,
             nodes=nodes,
             time_set=T,
+            scenarios=model.SCENARIOS,
+            scenario_probability=model.scenario_probability,
         )
 
         attach_standard_cost_expressions(
@@ -298,10 +320,16 @@ def add_pem_fuel_cell_block(
         )
 
         fc_block.electricity_source_term = pyo.Expression(
-            nodes, T, rule=lambda m, node, t: m.electricity_generation_kwh_electric[node, t]
+            nodes,
+            model.SCENARIOS,
+            T,
+            rule=lambda m, node, s, t: m.electricity_generation_kwh_electric[node, s, t],
         )
         fc_block.hydrogen_sink_term = pyo.Expression(
-            nodes, T, rule=lambda m, node, t: m.hydrogen_consumption_kwh_h2_lhv[node, t]
+            nodes,
+            model.SCENARIOS,
+            T,
+            rule=lambda m, node, s, t: m.hydrogen_consumption_kwh_h2_lhv[node, s, t],
         )
 
     model.pem_fuel_cell = pyo.Block(rule=block_rule)

@@ -51,8 +51,8 @@ def test_overarching_report_schema_emissions_placeholder_and_costs_by_technology
         },
     }
     m = build_model(data, technology_parameters=tech, financials={})
-    m.utility.grid_import["electricity_load__x", 0].value = 0.0
-    m.solar_pv.solar_generation["electricity_load__x", "solar_p", 0].value = 0.0
+    m.utility.grid_import["electricity_load__x", "_default", 0].value = 0.0
+    m.solar_pv.solar_generation["electricity_load__x", "solar_p", "_default", 0].value = 0.0
 
     rep = build_overarching_report(m, data)
 
@@ -75,7 +75,7 @@ def test_overarching_report_emissions_provider():
     )
     data.utility_rate_by_node = {"electricity_load__x": data.utility_rate}
     m = build_model(data, technology_parameters={}, financials={})
-    m.utility.grid_import["electricity_load__x", 0].value = 0.0
+    m.utility.grid_import["electricity_load__x", "_default", 0].value = 0.0
 
     def provider(_model, _data):
         return {"aggregate": {"co2e_kg": 42.0}, "by_technology": {"grid": {"co2e_kg": 42.0}}}
