@@ -19,6 +19,9 @@ from run.build_run_data import build_run_data
 from utilities.model_diagnostics import collect_model_diagnostics, print_model_diagnostics
 from utilities.results import extract_solution, print_solution_summary, write_timeseries_csv
 
+# Set False to silence Gurobi's live solver log; True streams it to the console as it solves.
+SOLVER_TEE = True
+
 
 def main() -> int:
     """Run a first end-to-end data loading path for the default case.
@@ -28,7 +31,7 @@ def main() -> int:
     """
     t0 = time.perf_counter()
     project_root = Path(__file__).resolve().parents[1]
-    case_name = os.getenv("DEROPT_CASE", "Igiugig_xlsx")
+    case_name = os.getenv("DEROPT_CASE", "stochastic_demo")
     case_cfg = get_case_config(project_root, case_name)
 
     print("Loading data...")
@@ -80,7 +83,7 @@ def main() -> int:
     if solver.available():
         print("Solving with Gurobi...")
         t_solve = time.perf_counter()
-        results = solver.solve(model, tee=bool(os.environ.get("DEROPT_SOLVER_TEE")))
+        results = solver.solve(model, tee=SOLVER_TEE)
         print(f"  Solve done in {time.perf_counter() - t_solve:.1f}s")
         status = results.solver.status
         term = results.solver.termination_condition

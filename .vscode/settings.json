@@ -1,0 +1,5 @@
+{
+    "python.defaultInterpreterPath": "C:\\Users\\rjf\\AppData\\Local\\anaconda3\\envs\\pyomo\\python.exe",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
+}
