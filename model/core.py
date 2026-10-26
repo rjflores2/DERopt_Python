@@ -201,6 +201,15 @@ def build_model(
         # The utility block is not a registry technology, but reporting hooks discover it the same way.
         model.utility._technology_module = "utilities.electricity_import_export"
 
+    # Network (LinDistFlow) block: bus voltage / branch flow / thermal limits layered on top
+    # of model.utility.grid_import. Not a registry technology; must come after the utility
+    # block above (its p_inj expression reads model.utility.grid_import). Fully opt-in --
+    # attaches nothing when data.network_topology is unset.
+    from utilities.network import register as register_network_block
+    register_network_block(model, data)
+    if getattr(model, "network", None) is not None:
+        model.network._technology_module = "utilities.network"
+
     # -------------------------------------------------------------------------
     # Electricity balance: sources == sinks (per node, per time)
     # Sources = generation + imports + storage discharge.

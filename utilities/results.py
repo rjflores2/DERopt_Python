@@ -23,6 +23,98 @@ from utilities.postsolve_diagnostics import (
 from utilities.reporting import build_overarching_report
 
 
+def _sum(values) -> float:
+    return float(sum(float(pyo.value(v)) for v in values))
+
+
+def _extract_adopted_capacity(model: pyo.ConcreteModel) -> dict[str, dict[str, float]]:
+    """Best-effort, per-technology installed/adopted capacity, summed over all nodes.
+
+    Guarded with ``hasattr`` throughout: a technology not present on ``model``, or a
+    formulation variant (LP vs. MILP/binary, adoption on vs. off) that doesn't define a
+    given attribute, is silently skipped rather than raising -- this must work for any
+    case/technology mix, not just the one it was written against.
+    """
+    nodes = list(model.NODES)
+    out: dict[str, dict[str, float]] = {}
+
+    if hasattr(model, "solar_pv"):
+        blk = model.solar_pv
+        profiles = list(blk.SOLAR)
+        existing = _sum(blk.existing_solar_capacity[n, p] for n in nodes for p in profiles)
+        adopted = (
+            _sum(blk.solar_capacity_adopted[n, p] for n in nodes for p in profiles)
+            if hasattr(blk, "solar_capacity_adopted")
+            else 0.0
+        )
+        out["solar_pv"] = {"existing_kw": existing, "adopted_kw": adopted, "total_kw": existing + adopted}
+
+    if hasattr(model, "hydrokinetic"):
+        blk = model.hydrokinetic
+        profiles = list(blk.HKT)
+        existing = _sum(blk.existing_capacity_kw[n, p] for n in nodes for p in profiles)
+        total = _sum(blk.total_capacity_kw[n, p] for n in nodes for p in profiles)
+        entry = {"existing_kw": existing, "adopted_kw": total - existing, "total_kw": total}
+        if hasattr(blk, "installed_units"):
+            entry["installed_units"] = _sum(blk.installed_units[n, p] for n in nodes for p in profiles)
+        out["hydrokinetic"] = entry
+
+    if hasattr(model, "controllable_hydro"):
+        blk = model.controllable_hydro
+        units = list(blk.HYDRO)
+        out["controllable_hydro"] = {
+            "turbine_capacity_kw": _sum(blk.turbine_capacity_kw[n, d] for n in nodes for d in units),
+            "pump_capacity_kw": _sum(blk.pump_capacity_kw[n, d] for n in nodes for d in units),
+        }
+
+    if hasattr(model, "battery_energy_storage"):
+        blk = model.battery_energy_storage
+        existing = _sum(blk.existing_energy_capacity[n] for n in nodes)
+        total = _sum(blk.total_energy_capacity[n] for n in nodes)
+        out["battery_energy_storage"] = {
+            "existing_kwh": existing, "adopted_kwh": total - existing, "total_kwh": total,
+        }
+
+    if hasattr(model, "flow_battery_energy_storage"):
+        blk = model.flow_battery_energy_storage
+        if hasattr(blk, "total_energy_capacity"):
+            out["flow_battery_energy_storage"] = {
+                "total_kwh": _sum(blk.total_energy_capacity[n] for n in nodes),
+            }
+
+    for tech_name in ("pem_electrolyzer", "pem_fuel_cell", "alkaline_electrolyzer"):
+        if not hasattr(model, tech_name):
+            continue
+        blk = getattr(model, tech_name)
+        if not hasattr(blk, "installed_electric_capacity_kw"):
+            continue
+        existing = _sum(blk.existing_capacity_kw[n] for n in nodes)
+        total = _sum(blk.installed_electric_capacity_kw[n] for n in nodes)
+        entry = {"existing_kw": existing, "adopted_kw": total - existing, "total_kw": total}
+        if hasattr(blk, "installed_unit_count"):
+            entry["installed_units"] = _sum(blk.installed_unit_count[n] for n in nodes)
+        out[tech_name] = entry
+
+    if hasattr(model, "compressed_gas_hydrogen_storage"):
+        blk = model.compressed_gas_hydrogen_storage
+        existing = _sum(blk.existing_energy_capacity_kwh_h2_lhv[n] for n in nodes)
+        total = _sum(blk.total_energy_capacity_kwh_h2_lhv[n] for n in nodes)
+        out["compressed_gas_hydrogen_storage"] = {
+            "existing_kwh_h2": existing, "adopted_kwh_h2": total - existing, "total_kwh_h2": total,
+        }
+
+    if hasattr(model, "diesel_generator"):
+        blk = model.diesel_generator
+        unit_kw = float(pyo.value(blk.unit_capacity_kw))
+        if hasattr(blk, "installed_unit_count"):
+            units = _sum(blk.installed_unit_count[n] for n in nodes)
+            out["diesel_generator"] = {"installed_units": units, "installed_kw": units * unit_kw}
+        elif hasattr(blk, "installed_capacity"):
+            out["diesel_generator"] = {"installed_kw": _sum(blk.installed_capacity[n] for n in nodes)}
+
+    return out
+
+
 def extract_solution(model: pyo.ConcreteModel, data: DataContainer) -> dict[str, Any]:
     """Extract solution into the legacy flat dict shape.
 
@@ -130,8 +222,22 @@ def extract_solution(model: pyo.ConcreteModel, data: DataContainer) -> dict[str,
     if not timeseries["import_price_per_kwh"] and getattr(data, "import_prices", None):
         timeseries["import_price_per_kwh"] = list(data.import_prices)
 
+    # LCOE = total reported annual cost / annual served load. Uses total_reported_cost
+    # (optimizing + fixed non-optimizing) rather than just the optimization objective, since
+    # LCOE is meant to be the full system cost per kWh served, not only the decision-relevant
+    # portion of it.
+    annual_load_kwh = sum(timeseries["load_kwh"])
+    total_reported_cost = cost_breakdown.get("total_reported_cost")
+    lcoe_per_kwh = (
+        total_reported_cost / annual_load_kwh
+        if total_reported_cost is not None and annual_load_kwh
+        else None
+    )
+
     return {
         "objective_value": agg.get("objective_optimizing_annual"),
+        "lcoe_per_kwh": lcoe_per_kwh,
+        "adopted_capacity": _extract_adopted_capacity(model),
         "cost_breakdown": cost_breakdown,
         "timeseries": timeseries,
         "by_technology_report": report.get("by_technology_report") or {},
@@ -144,7 +250,22 @@ def extract_solution(model: pyo.ConcreteModel, data: DataContainer) -> dict[str,
 
 
 def print_solution_summary(extracted: dict[str, Any]) -> None:
-    """Print a short summary of the solution to the terminal."""
+    """Print a short summary of the solution to the terminal.
+
+    LCOE and adopted capacity print first -- the two headline numbers for a demo/sponsor
+    audience -- ahead of the more detailed cost breakdown that follows.
+    """
+    lcoe = extracted.get("lcoe_per_kwh")
+    if lcoe is not None:
+        print(f"  LCOE: ${lcoe:,.4f}/kWh")
+
+    adopted = extracted.get("adopted_capacity") or {}
+    if adopted:
+        print("  Adopted / installed capacity:")
+        for tech, entry in adopted.items():
+            parts = ", ".join(f"{k}={v:,.2f}" for k, v in entry.items())
+            print(f"    {tech}: {parts}")
+
     obj = extracted.get("objective_value")
     if obj is not None:
         print(f"  Objective (decision-relevant cost): {obj:,.2f}")
@@ -199,31 +320,37 @@ def print_solution_summary(extracted: dict[str, Any]) -> None:
 def write_timeseries_csv(extracted: dict[str, Any], path: Path | str) -> None:
     """Write time series from extracted solution to a CSV file.
 
-    Columns: datetime (or step), load_kwh, grid_import_kwh, solar_kwh, import_price_per_kwh.
+    Columns: ``datetime``, ``load_kwh``, ``import_price_per_kwh``, then one
+    ``<block_name>_kwh`` column per top-level block with a nonzero
+    ``electricity_source_term`` (e.g. ``solar_pv_kwh``, ``hydrokinetic_kwh``,
+    ``diesel_generator_kwh``, ``battery_energy_storage_kwh`` (discharge),
+    ``pem_fuel_cell_kwh``, ``utility_kwh`` (grid import)) -- see
+    ``timeseries['electricity_source_kwh_by_block']`` in ``extract_solution``. Column set
+    varies by case (only blocks that actually generated something appear), which is why
+    downstream readers (e.g. ``scripts/plot_weekly_generation.py``) select columns by name
+    rather than fixed position.
     """
     path = Path(path)
     ts = extracted.get("timeseries") or {}
-    n = len(ts.get("grid_import_kwh") or [])
+    n = len(ts.get("load_kwh") or [])
     if n == 0:
         return
     datetimes = ts.get("datetime") or list(range(n))
-    load = ts.get("load_kwh") or [0.0] * n
-    grid = ts.get("grid_import_kwh") or [0.0] * n
-    solar = ts.get("solar_kwh") or [0.0] * n
-    price = ts.get("import_price_per_kwh") or [0.0] * n
-    # Normalize lengths
-    load = (load + [0.0] * n)[:n]
-    grid = (grid + [0.0] * n)[:n]
-    solar = (solar + [0.0] * n)[:n]
+    load = (ts.get("load_kwh") or [0.0] * n)[:n]
+    price = (ts.get("import_price_per_kwh") or [0.0] * n)
     price = (price + [0.0] * n)[:n]
 
+    by_block = ts.get("electricity_source_kwh_by_block") or {}
+    block_names = sorted(by_block.keys())
+    block_series = {name: (list(series) + [0.0] * n)[:n] for name, series in by_block.items()}
+
+    header = ["datetime", "load_kwh", "import_price_per_kwh"] + [f"{name}_kwh" for name in block_names]
     with open(path, "w", newline="", encoding="utf-8") as f:
-        f.write("datetime,load_kwh,grid_import_kwh,solar_kwh,import_price_per_kwh\n")
+        f.write(",".join(header) + "\n")
         for i in range(n):
             dt = datetimes[i] if i < len(datetimes) else i
-            if hasattr(dt, "isoformat"):
-                dt_str = dt.isoformat()
-            else:
-                dt_str = str(dt)
-            f.write(f"{dt_str},{load[i]:.4f},{grid[i]:.4f},{solar[i]:.4f},{price[i]:.6f}\n")
+            dt_str = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+            row = [dt_str, f"{load[i]:.4f}", f"{price[i]:.6f}"]
+            row += [f"{block_series[name][i]:.4f}" for name in block_names]
+            f.write(",".join(row) + "\n")
     print(f"  Wrote timeseries to {path}")

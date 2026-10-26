@@ -26,6 +26,7 @@ Technology diagnostics (optional, plug-in style):
 from technologies.alkaline_electrolyzer import register as register_alkaline_electrolyzer
 from technologies.battery_energy_storage import register as register_battery_energy_storage
 from technologies.compressed_gas_hydrogen_storage import register as register_compressed_gas_hydrogen_storage
+from technologies.controllable_hydro import register as register_controllable_hydro
 from technologies.diesel_generator import register as register_diesel_generator
 from technologies.flow_battery_energy_storage import register as register_flow_battery_energy_storage
 from technologies.hydrokinetic import register as register_hydrokinetic
@@ -41,6 +42,7 @@ REGISTRY = [
     ("flow_battery_energy_storage", register_flow_battery_energy_storage),
     ("diesel_generator", register_diesel_generator),
     ("hydrokinetic", register_hydrokinetic),
+    ("controllable_hydro", register_controllable_hydro),
     ("pem_electrolyzer", register_pem_electrolyzer),
     ("alkaline_electrolyzer", register_alkaline_electrolyzer),
     ("pem_fuel_cell", register_pem_fuel_cell),

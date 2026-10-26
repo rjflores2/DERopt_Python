@@ -109,6 +109,10 @@ class CaseConfig:
     # Optional two-stage stochastic scenarios (e.g. wet/typical/dry hydro years). None (default)
     # means today's deterministic behavior: a single implicit scenario at probability 1.0.
     scenarios: list["ScenarioConfig"] | None = None
+    # Optional electrical network (LinDistFlow) topology. None (default) means today's
+    # behavior: every node is an independent bus with no shared lines/voltage/thermal
+    # limits. Grid-tied only in this first version (see NetworkConfig / utilities.network).
+    network: "NetworkConfig | None" = None
 
 
 @dataclass(slots=True)
@@ -153,6 +157,46 @@ class ScenarioConfig:
     hydrokinetic_reference_swept_area_m2: float | None = None
     utility_tariffs: list[UtilityTariffConfig] | None = None
     node_utility_tariff: dict[str, str] | None = None
+
+
+@dataclass(slots=True)
+class NetworkBranchConfig:
+    """One line/branch of a radial feeder. ``from_bus``/``to_bus`` are unordered endpoints --
+    the resolver derives the true parent/child direction outward from ``slack_bus``, so
+    swapping them here does not change the result."""
+
+    from_bus: str
+    to_bus: str
+    resistance_ohm: float
+    reactance_ohm: float
+    rating_kva: float
+
+
+@dataclass(slots=True)
+class NetworkConfig:
+    """Electrical network (LinDistFlow) topology and settings for one grid-tied feeder.
+
+    ``buses``, ``slack_bus``, ``branches``, and ``base_kv`` have no default: physical
+    infrastructure, where a wrong guess is worse than a failure. Requires a grid-tied
+    ``CaseConfig.utility_mode`` (this first version has no off-grid/islanded network support).
+    """
+
+    buses: list[str]
+    slack_bus: str
+    branches: list[NetworkBranchConfig]
+    base_kv: float  # nominal feeder line-to-line voltage (kV)
+    # Node key -> bus key, for nodes whose bus differs from their node name. Omitted nodes
+    # default to bus == node name.
+    bus_of_node: dict[str, str] | None = None
+    # Bus key -> assumed power factor (0, 1]; reactive power is a fixed multiple of real power
+    # draw (Q = P * tan(acos(pf))), not separately dispatched. Omitted buses default to 1.0
+    # (unity, i.e. zero reactive power).
+    power_factor_by_bus: dict[str, float] | None = None
+    voltage_limit_pu: tuple[float, float] = (0.95, 1.05)
+    voltage_limits_enabled: bool = True
+    branch_thermal_margin: float = 1.0
+    branch_limits_enabled: bool = True
+    branch_polygon_sides: int = 22
 
 
 def discover_load_file(folder: Path) -> Path:

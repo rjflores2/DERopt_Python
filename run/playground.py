@@ -22,6 +22,26 @@ from utilities.results import extract_solution, print_solution_summary, write_ti
 # Set False to silence Gurobi's live solver log; True streams it to the console as it solves.
 SOLVER_TEE = True
 
+# Bound the MIP search so a live run always finishes in bounded time -- the full Igiugig
+# case (diesel unit commitment + integer HKT units + electrolyzer/fuel-cell binaries, full
+# 8760-hour year) is a large MILP (~140k variables, ~17.5k binaries); scripts/run_paper_cases.py
+# budgets up to 2 hours per case at a 0.5% gap for this same model. Set to None to disable
+# either limit (unbounded search, matching pre-demo behavior). Gurobi reports the best
+# solution found and its remaining optimality gap either way, which is a legitimate result
+# to present even when a limit stops the search short of proven-optimal.
+SOLVER_NODE_LIMIT: int | None = 1000
+SOLVER_TIME_LIMIT_SECONDS: float | None = 600.0  # safety net; NodeLimit is expected to bind first
+
+# When DEROPT_EXPORT_CSV also produces results_timeseries.csv (see below), automatically
+# render the stacked-area weekly generation chart from it too -- one press-play, no separate
+# manual plotting step. Set to False to skip chart generation even when CSV export is on.
+# Week selection: DEROPT_CHART_START_DATE (e.g. "2022-07-04") takes priority if set; otherwise
+# CHART_START_INDEX (default ~July 1 in a non-leap 8760-hour year -- a representative summer
+# week with meaningful solar) via DEROPT_CHART_START_INDEX. DEROPT_CHART_HOURS overrides the
+# window length (default: 168h = 1 week).
+GENERATE_WEEKLY_CHART = True
+CHART_START_INDEX = 4344
+
 
 def main() -> int:
     """Run a first end-to-end data loading path for the default case.
@@ -81,14 +101,36 @@ def main() -> int:
     # Solve with Gurobi
     solver = pyo.SolverFactory("gurobi")
     if solver.available():
-        print("Solving with Gurobi...")
+        if SOLVER_NODE_LIMIT is not None:
+            solver.options["NodeLimit"] = SOLVER_NODE_LIMIT
+        if SOLVER_TIME_LIMIT_SECONDS is not None:
+            solver.options["TimeLimit"] = SOLVER_TIME_LIMIT_SECONDS
+        print(
+            f"Solving with Gurobi (NodeLimit={SOLVER_NODE_LIMIT}, "
+            f"TimeLimit={SOLVER_TIME_LIMIT_SECONDS})..."
+        )
         t_solve = time.perf_counter()
         results = solver.solve(model, tee=SOLVER_TEE)
         print(f"  Solve done in {time.perf_counter() - t_solve:.1f}s")
         status = results.solver.status
         term = results.solver.termination_condition
         print(f"Solver: {status} / {term}")
-        if status == pyo.SolverStatus.ok and term == pyo.TerminationCondition.optimal:
+        # A node/time limit stops the search early with the best incumbent found so far --
+        # still a usable (feasible, just not provably optimal) result. Pyomo's Gurobi plugin
+        # reports status='aborted' (not 'ok') for these, verified directly against
+        # GUROBI_RUN.py's GRB.NODE_LIMIT/GRB.TIME_LIMIT handling -- so termination_condition,
+        # not solver status, is what actually distinguishes "has a usable solution" here.
+        terms_with_a_usable_solution = (
+            pyo.TerminationCondition.optimal,
+            pyo.TerminationCondition.maxTimeLimit,
+            pyo.TerminationCondition.maxEvaluations,  # Pyomo's mapping for Gurobi NodeLimit stops
+        )
+        if term in terms_with_a_usable_solution and pyo.value(model.obj, exception=False) is not None:
+            if term != pyo.TerminationCondition.optimal:
+                print(
+                    f"  Note: search stopped early ({term}); showing the best solution found, "
+                    "not a proven optimum."
+                )
             extracted = extract_solution(model, data)
             print("Results:")
             print_solution_summary(extracted)
@@ -97,6 +139,24 @@ def main() -> int:
                 csv_path = str(project_root / "results_timeseries.csv")
             if csv_path:
                 write_timeseries_csv(extracted, csv_path)
+                if GENERATE_WEEKLY_CHART:
+                    try:
+                        from scripts.plot_weekly_generation import plot_weekly_generation
+
+                        chart_path = plot_weekly_generation(
+                            csv_path,
+                            project_root / "weekly_generation.png",
+                            start_date=os.environ.get("DEROPT_CHART_START_DATE"),
+                            start_index=int(os.environ.get("DEROPT_CHART_START_INDEX", CHART_START_INDEX)),
+                            hours=int(os.environ.get("DEROPT_CHART_HOURS", 168)),
+                        )
+                        print(f"  Wrote weekly generation chart to {chart_path}")
+                    except Exception as exc:
+                        # Chart generation is a nice-to-have on top of the console/CSV
+                        # results, which are already printed/written by this point -- don't
+                        # let a plotting hiccup (e.g. an out-of-range default week for a
+                        # shorter/subset run) take down an otherwise-successful solve.
+                        print(f"  Weekly chart generation skipped ({exc})")
     else:
         print("Solver: Gurobi not available (install gurobipy); skipping solve")
 

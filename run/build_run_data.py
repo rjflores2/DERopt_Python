@@ -24,6 +24,7 @@ from data_loading.loaders.utility_rates import (
 from data_loading.schemas import DataContainer
 from data_loading.time_subset import apply_time_subset
 from shared.scenario_helpers import validate_scenario_probabilities
+from utilities.network.inputs import NetworkBranch, NetworkTopology
 
 from config.case_config import UtilityGridMode
 
@@ -146,6 +147,41 @@ def _load_resources(data: DataContainer, case_cfg: CaseConfig) -> None:
             datetime_column=getattr(case_cfg, "hydrokinetic_datetime_column", None),
             reference_swept_area_m2=getattr(case_cfg, "hydrokinetic_reference_swept_area_m2", None),
         )
+
+
+def _load_network(data: DataContainer, case_cfg: CaseConfig) -> None:
+    """Translate the optional ``CaseConfig.network`` into ``data.network_topology``, in place.
+
+    No topology validation happens here (radial-tree/node-mapping checks live in
+    ``utilities.network.inputs.resolve_network_block_inputs``, run at Pyomo build time) --
+    this is a pure config-layer-to-utilities-layer shape translation, matching how solar/
+    hydrokinetic paths above are handed to their loaders without re-validating here.
+    """
+    network_cfg = getattr(case_cfg, "network", None)
+    if network_cfg is None:
+        return
+    data.network_topology = NetworkTopology(
+        buses=list(network_cfg.buses),
+        slack_bus=network_cfg.slack_bus,
+        branches=[
+            NetworkBranch(
+                from_bus=b.from_bus,
+                to_bus=b.to_bus,
+                resistance_ohm=b.resistance_ohm,
+                reactance_ohm=b.reactance_ohm,
+                rating_kva=b.rating_kva,
+            )
+            for b in network_cfg.branches
+        ],
+        base_kv=network_cfg.base_kv,
+        bus_of_node=network_cfg.bus_of_node,
+        power_factor_by_bus=network_cfg.power_factor_by_bus,
+        voltage_limit_pu=network_cfg.voltage_limit_pu,
+        voltage_limits_enabled=network_cfg.voltage_limits_enabled,
+        branch_thermal_margin=network_cfg.branch_thermal_margin,
+        branch_limits_enabled=network_cfg.branch_limits_enabled,
+        branch_polygon_sides=network_cfg.branch_polygon_sides,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +654,9 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
       ``data.import_prices_by_node`` and ``data.utility_rate_by_node`` when grid is modeled.
     - Scenarios: optional two-stage stochastic overrides (``case_cfg.scenarios``). With none
       set, ``data`` keeps the default single implicit scenario at probability 1.0.
+    - Network: optional LinDistFlow topology (``case_cfg.network``). With none set,
+      ``data.network_topology`` stays ``None`` and every node keeps today's independent,
+      networkless behavior.
 
     Future: export rates, post-processing can be added here without expanding the
     playground script.
@@ -644,6 +683,8 @@ def build_run_data(project_root: Path, case_cfg: CaseConfig) -> DataContainer:
         )
 
     _load_scenarios(data, case_cfg, timestamps=timestamps, n_periods=n_periods)
+
+    _load_network(data, case_cfg)
 
     # Subset last: slice every per-timestep series (timeseries + import_prices + scenario
     # overrides) in one place so lengths stay aligned.

@@ -12,6 +12,8 @@ results/
 reports/
 artifacts/
 temp_debug_data.csv
+results_timeseries*.csv
+weekly_generation*.png
 
 # Solver/model export artifacts
 *.lp

@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+        
         {
             "name": "Debug DERopt playground (pyomo)",
             "type": "python",
@@ -16,6 +17,61 @@
 
             "env": {
                 "DEROPT_CASE": "igiugig_xlsx",
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Run Igiugig - Diesel ON (playground)",
+            "type": "python",
+            "request": "launch",
+
+            "program": "${workspaceFolder}/run/playground.py",
+
+            "cwd": "${workspaceFolder}",
+
+            "console": "internalConsole",
+
+            "justMyCode": true,
+
+            "env": {
+                "DEROPT_CASE": "igiugig_diesel_on",
+                "DEROPT_EXPORT_CSV": "1",
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Run Igiugig - Diesel OFF (playground)",
+            "type": "python",
+            "request": "launch",
+
+            "program": "${workspaceFolder}/run/playground.py",
+
+            "cwd": "${workspaceFolder}",
+
+            "console": "internalConsole",
+
+            "justMyCode": true,
+
+            "env": {
+                "DEROPT_CASE": "igiugig_diesel_off",
+                "DEROPT_EXPORT_CSV": "1",
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Run Igiugig paper cases (Gurobi, full 8760h MILP)",
+            "type": "python",
+            "request": "launch",
+
+            "program": "${workspaceFolder}/scripts/run_paper_cases.py",
+
+            "cwd": "${workspaceFolder}",
+
+            "console": "internalConsole",
+
+            "justMyCode": true,
+
+            "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             }
         }

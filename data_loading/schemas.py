@@ -28,6 +28,11 @@ class DataContainer:
     import_prices_by_node: dict[str, list[float]] | None = None
     utility_rate_by_node: dict[str, Any] | None = None
     node_utility_tariff_key: dict[str, str] | None = None
+    # Optional electrical network (LinDistFlow) topology: a
+    # ``utilities.network.inputs.NetworkTopology`` instance, or None (default: no network,
+    # today's behavior unchanged). Typed loosely (Any) so data_loading does not need to
+    # import utilities (same rationale as utility_rate above).
+    network_topology: Any = None
 
     # Stochastic scenarios (two-stage): default is a single implicit scenario at
     # probability 1.0, so a case with no scenarios configured behaves exactly like
